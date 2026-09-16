@@ -323,8 +323,26 @@ export function createStationUI(host, on) {
    * offers come first because that is the decision being made; the live ones
    * sit underneath as a reminder of what is already owed.
    */
+  /**
+   * The offers a commander can still take.
+   *
+   * Taken offers are dropped rather than shown greyed out. The job is already
+   * in the list below as a live contract, and listing it twice - once dimmed at
+   * the top as "accepted", again at the bottom as "in progress" - reads as a
+   * duplicate, not as information. The commander sees it where it matters:
+   * among the jobs they are carrying.
+   *
+   * The cursor design is unchanged: still one list, still one cursor, with the
+   * available offers first and the taken ones after - just one row per job.
+   * `MISSIONS.accept` remains the real guard against taking a job twice; the
+   * screen no longer needs a second one.
+   */
+  function availableOffers(state) {
+    return ((state && state.offers) || []).filter((o) => !o.taken);
+  }
+
   function renderContracts(s) {
-    const offers = s.offers || [];
+    const offers = availableOffers(s);
     const live = s.contracts || [];
 
     if (!offers.length && !live.length) {
@@ -344,7 +362,6 @@ export function createStationUI(host, on) {
     offers.forEach((offer, i) => {
       const tr = el('tr', 'selectable');
       tr.classList.toggle('selected', i === selectedContract);
-      tr.classList.toggle('no-stock', !!offer.taken);
       tr.addEventListener('click', () => { selectedContract = i; render(); });
       tr.addEventListener('dblclick', () => { selectedContract = i; activateContract(); });
 
@@ -355,8 +372,9 @@ export function createStationUI(host, on) {
       tr.appendChild(el('td', '', offer.targetName));
       tr.appendChild(el('td', 'elite-num', String(offer.days)));
       tr.appendChild(el('td', 'elite-num', offer.reward + ' CR'));
-      tr.appendChild(el('td', offer.taken ? 'elite-good' : 'elite-dim',
-        offer.taken ? 'accepted' : 'available'));
+      // The last column says what Enter will do on this row, which is why the
+      // live rows below say "abandon" and these say "accept".
+      tr.appendChild(el('td', 'elite-dim', 'accept'));
       table.appendChild(tr);
     });
 
@@ -591,7 +609,7 @@ export function createStationUI(host, on) {
   /** Offers plus live contracts, which is the length of the contracts list. */
   function contractRowCount() {
     const s = currentState || {};
-    return ((s.offers || []).length) + ((s.contracts || []).length);
+    return availableOffers(s).length + ((s.contracts || []).length);
   }
 
   /** Activate the current selection. */
@@ -635,11 +653,13 @@ export function createStationUI(host, on) {
    */
   function activateContract() {
     const s = currentState || {};
-    const offers = s.offers || [];
+    const offers = availableOffers(s);
     if (selectedContract < offers.length) {
       const offer = offers[selectedContract];
       if (!offer) return;
-      if (offer.taken) return notify('Already accepted');
+      // No `taken` check here any more: a taken offer is not in this list. The
+      // guard that matters lives in `MISSIONS.accept`, which refuses a
+      // duplicate id whatever the screen believes.
       if (actions.acceptContract) actions.acceptContract(offer.id);
       return;
     }

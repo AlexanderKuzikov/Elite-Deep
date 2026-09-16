@@ -703,13 +703,14 @@ test('the contracts tab lists the offers and the live contracts', () => {
 });
 
 test('the board is ordered offers first, then contracts already taken', () => {
-  // One cursor over one list. The order is what makes that legible.
+  // One cursor over one list. The order is what makes that legible: the jobs
+  // you could take, then the jobs you have.
   const { ui, host } = freshUI();
   ui.open(stateWithBoard());
   ui.setTab('contracts');
   const text = host.textContent;
   assert.ok(text.indexOf('Ceeri') < text.indexOf('Diso'),
-    'a taken contract is listed above an offer');
+    'a live contract is listed above an available offer');
 });
 
 test('Enter on an offer accepts it', () => {
@@ -722,14 +723,24 @@ test('Enter on an offer accepts it', () => {
   assert.equal(accept.args[0], 'o1');
 });
 
-test('Enter on an offer already taken refuses rather than accepting twice', () => {
-  const { ui, calls } = freshUI();
+test('a taken offer is not listed at all, so no job appears twice', () => {
+  // The fixture's third offer is already taken and is also the live contract.
+  // It used to be listed twice - dimmed at the top as "accepted", again at the
+  // bottom as "in progress" - which reads as a duplicate rather than as
+  // information. One list, one cursor, one row per job.
+  const { ui, host } = freshUI();
   ui.open(stateWithBoard());
   ui.setTab('contracts');
-  ui.moveSelection(2);            // the third row, which is already accepted
-  ui.activate();
-  assert.equal(calls.find((c) => c.key === 'acceptContract'), undefined,
-    'an already-accepted offer was accepted again');
+  const rows = Array.from(host.querySelectorAll('tr'))
+    .filter((tr) => tr.classList.contains('selectable'));
+  assert.equal(rows.length, 3, 'expected two available offers and one live contract');
+  assert.equal(rows.filter((tr) => tr.textContent.includes('Diso')).length, 1,
+    'the taken job is listed more than once');
+  // And the row that is left says what Enter does with it.
+  assert.ok(rows[2].textContent.includes('abandon'),
+    'the live row does not say what Enter does');
+  assert.ok(rows[0].textContent.includes('accept'),
+    'an available row does not say what Enter does');
 });
 
 test('Enter on a live contract abandons it', () => {
@@ -738,7 +749,7 @@ test('Enter on a live contract abandons it', () => {
   const { ui, calls } = freshUI();
   ui.open(stateWithBoard());
   ui.setTab('contracts');
-  ui.moveSelection(3);            // past the three offers, onto the live one
+  ui.moveSelection(2);            // past the two available offers, onto the live one
   ui.activate();
   const abandon = calls.find((c) => c.key === 'abandonContract');
   assert.ok(abandon, 'nothing was abandoned');
@@ -746,17 +757,17 @@ test('Enter on a live contract abandons it', () => {
 });
 
 test('the cursor wraps around the whole board', () => {
-  // Four rows (three offers and one live contract), so four steps forward is
-  // back where it started. Asserted by *acting*, because the cursor itself is
-  // private - and a wrap that silently stopped at the end would leave the last
-  // row unreachable from below.
+  // Three rows: two available offers and one live contract. Three steps
+  // forward is back where it started. Asserted by *acting*, because the cursor
+  // itself is private - and a wrap that silently stopped at the end would
+  // leave the last row unreachable from below.
   const { ui, calls } = freshUI();
   ui.open(stateWithBoard());
   ui.setTab('contracts');
-  for (let i = 0; i < 4; i += 1) ui.moveSelection(1);
+  for (let i = 0; i < 3; i += 1) ui.moveSelection(1);
   ui.activate();
   const accept = calls.find((c) => c.key === 'acceptContract');
-  assert.ok(accept, 'four steps did not return to the first row');
+  assert.ok(accept, 'three steps did not return to the first row');
   assert.equal(accept.args[0], 'o1');
 });
 
