@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: Unit tests and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Unit tests
+        run: npm test
+      - name: Build the single-file bundle
+        run: npm run build
+      - name: Report the bundle size
+        run: ls -la dist/
+
+  e2e:
+    name: End-to-end in headless Chrome
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # The runner ships Google Chrome at /usr/bin/google-chrome, which is in
+      # the script's candidate list. If a future image drops it, point
+      # CHROME_PATH at whatever browser is there.
+      - name: End-to-end
+        run: npm run e2e
+      - name: Upload the screenshots the run produced
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: e2e-shots/
+          if-no-files-found: ignore

@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output. The single-file bundle is produced by `npm run build` and is
+# deployed to GitHub Pages by the workflow, so it is never committed.
+dist/
+
+# Scratch screenshots, overwritten by every `npm run e2e`. The curated set the
+# README embeds lives in `docs/screenshots/` and *is* committed.
+e2e-shots/
+
+# Logs and temporary files
+*.log
+*.tmp
+npm-debug.log*
+
+# Editor and OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
