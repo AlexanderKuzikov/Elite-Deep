@@ -20,7 +20,13 @@ import { dirname, join } from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
-const puppeteer = require('D:/GitHub/node_modules/puppeteer-core');
+// A bare specifier, declared in `package.json` like every other dependency.
+// This used to be `require('D:/GitHub/node_modules/puppeteer-core')` - an
+// absolute path on the machine it was written on, which worked there only
+// because the package happened to sit in a parent directory. On CI, and for
+// anyone who cloned the repository, `npm run e2e` died with "Cannot find
+// module". A path that resolves on one computer is not a dependency.
+const puppeteer = require('puppeteer-core');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
