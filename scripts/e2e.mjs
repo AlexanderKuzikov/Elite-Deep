@@ -562,6 +562,11 @@ try {
     // ship die here would test the death screen, which is already covered.
     let deaths = 0;
     let modes = new Set();
+    // Timed so a catastrophic regression - an accidental O(n^2) sweep, a
+    // per-frame allocation of a scene object - has something to fail against.
+    // The bound is deliberately loose: measured, one frame of simulation costs
+    // 0.03 ms, so this would have to be a hundred times slower to trip.
+    const started = performance.now();
     for (let i = 0; i < 2000; i++) {
       g.player.hull = g.player.hullMax;
       g.player.shields = g.player.shieldMax;
@@ -570,6 +575,7 @@ try {
       g.step(1 / 60, 400 + i / 60, { render: i % 200 === 0 });
       modes.add(g.mode);
     }
+    const msPerFrame = (performance.now() - started) / 2000;
     const f = g.session.flight;
     const finite = [f.pos.x, f.pos.y, f.pos.z, f.vel.x, f.vel.y, f.vel.z,
                     f.quat.x, f.quat.y, f.quat.z, f.quat.w].every(Number.isFinite);
@@ -580,11 +586,15 @@ try {
       modes: Array.from(modes).join(','),
       ships: g.session.traffic.ships.length,
       sceneChildren: g.renderer.scene.children.length,
+      msPerFrame: msPerFrame,
       x: f.pos.x, y: f.pos.y, z: f.pos.z,
     };
   });
   check('2000 frames produce finite ship state', long.finite,
     `pos (${long.x.toFixed(0)}, ${long.y.toFixed(0)}, ${long.z.toFixed(0)})`);
+  check('a frame of simulation stays inside its budget',
+    long.msPerFrame < 4,
+    long.msPerFrame.toFixed(2) + ' ms/frame (a 60 fps budget is 16.7)');
   check('the mode stayed valid for the whole long run',
     ['flight', 'dead', 'docked', 'chart'].includes(long.mode),
     'final=' + long.mode + ' seen=' + long.modes);
