@@ -409,6 +409,62 @@ function findByName(galaxy, name) {
   return null;
 }
 
+/**
+ * Fewest jumps from one system to another, on the given per-hop fuel.
+ *
+ * **Walks the route graph, not straight lines.** Only `galaxy.routes` edges can
+ * be jumped, and an edge is passable only when its length in light years is
+ * within a full tank - that is exactly what `canJump` enforces in the game. A
+ * straight-line metric would call two systems four light years apart "close"
+ * even when no chain of routes connects them at all.
+ *
+ * Lived in `scripts/economy-sim.mjs` until the board needed it. It is here now
+ * because the board was measured handing out targets **28 light years away on a
+ * 7-light-year tank**, and no test could see it: the sim knew about reachability
+ * and the contract generator did not. One implementation, both callers.
+ *
+ * Returns `Infinity` when no chain of tanks gets there.
+ */
+function hopsBetween(galaxy, fromIndex, toIndex, fuel) {
+  if (fromIndex === toIndex) return 0;
+  if (!(fuel > 0)) return Infinity;
+
+  // Adjacency in light years, built once per call. 64 systems and 161 routes,
+  // so the walk is trivial and caching would outlive its usefulness.
+  var ly = galaxy.jumpReference ? 7 / galaxy.jumpReference : 0.194;
+  var edges = {};
+  for (var r = 0; r < galaxy.routes.length; r++) {
+    var route = galaxy.routes[r];
+    var len = route.dist * ly;
+    if (!edges[route.a]) edges[route.a] = [];
+    if (!edges[route.b]) edges[route.b] = [];
+    edges[route.a].push({ to: route.b, len: len });
+    edges[route.b].push({ to: route.a, len: len });
+  }
+
+  var seen = {};
+  seen[fromIndex] = true;
+  var frontier = [fromIndex];
+  for (var hops = 1; hops <= 40; hops += 1) {
+    var next = [];
+    for (var f = 0; f < frontier.length; f += 1) {
+      var here = frontier[f];
+      var out = edges[here] || [];
+      for (var e = 0; e < out.length; e += 1) {
+        var step = out[e];
+        if (step.len > fuel) continue;
+        if (step.to === toIndex) return hops;
+        if (seen[step.to]) continue;
+        seen[step.to] = true;
+        next.push(step.to);
+      }
+    }
+    if (!next.length) break;
+    frontier = next;
+  }
+  return Infinity;
+}
+
 export {
   SYSTEM_COUNT,
   DISC_RADIUS,
@@ -418,6 +474,7 @@ export {
   distance,
   neighbors,
   findByName,
+  hopsBetween,
 };
 
 /**
@@ -426,5 +483,5 @@ export {
  */
 export default {
   SYSTEM_COUNT, DISC_RADIUS, JUMP_REFERENCE, STAR_CLASSES,
-  generate, distance, neighbors, findByName,
+  generate, distance, neighbors, findByName, hopsBetween,
 };

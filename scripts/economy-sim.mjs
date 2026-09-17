@@ -159,29 +159,16 @@ function affordableUpgrade(player) {
 /**
  * Fewest jumps from one system to another, on the given per-hop fuel.
  *
- * A commander who takes a job they cannot reach in time is not a commander,
- * they are a fine. The first version of this sim did exactly that: it accepted
- * the highest-paying job on the board regardless of distance, failed it, and
- * spent the rest of the run broke. That measured the strategy, not the economy.
+ * Delegates to `G.hopsBetween`, which walks the route graph. The version that
+ * used to live here measured **straight-line** distance, so it would call two
+ * systems four light years apart reachable even when no chain of routes joined
+ * them - and it disagreed with the game, which only ever jumps edges. It was
+ * moved into `logic/galaxy.js` when the contract board needed the same answer,
+ * because two implementations of reachability is how the board ended up handing
+ * out 28-light-year targets on a 7-light-year tank.
  */
 function hopsBetween(from, targetIndex, fuel) {
-  if (from.index === targetIndex) return 0;
-  const seen = new Set([from.index]);
-  let frontier = [from];
-  for (let hops = 1; hops <= 40; hops += 1) {
-    const next = [];
-    for (const s of frontier) {
-      for (const option of reachable(s, fuel)) {
-        if (option.system.index === targetIndex) return hops;
-        if (seen.has(option.system.index)) continue;
-        seen.add(option.system.index);
-        next.push(option.system);
-      }
-    }
-    if (!next.length) break;
-    frontier = next;
-  }
-  return Infinity;
+  return G.hopsBetween(galaxy, from.index, targetIndex, fuel);
 }
 
 // --- The run ---------------------------------------------------------------
