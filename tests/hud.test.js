@@ -791,3 +791,70 @@ test('the flight HUD is not drawn behind the station screen', () => {
   assert.equal(H.hudOverlayFor('chart'), 'flight');
   assert.equal(H.hudOverlayFor('flight'), 'flight');
 });
+
+// --- The chart is a place, not an overlay ----------------------------------
+
+test('the chart replaces the instruments instead of dimming them', () => {
+  // The chart is a *place*: it replaces the view of space. It used to be drawn
+  // last, over everything, so its backdrop dimmed the HUD along with the world.
+  // At 0.86 that left the status column faint; raising the opacity to kill the
+  // world ghosting made it nearly invisible. Both symptoms had one cause - the
+  // backdrop was covering the wrong layer.
+  const flight = recordingContext();
+  const flightState = fullState();
+  flightState.showChart = false;
+  H.drawHud(flight, flightState);
+
+  const chart = recordingContext();
+  const chartState = {
+    ...fullState(),
+    showChart: true,
+    chart: {
+      discRadius: 260, jumpRange: 36, routes: [],
+      systems: [{ index: 0, name: 'HERE', x: 0, y: 0, danger: 0.1 }],
+      player: { index: 0 }, selected: -1,
+    },
+  };
+  H.drawHud(chart, chartState);
+
+  // The instruments are gone...
+  assert.ok(chart.calls.length < flight.calls.length,
+    'the chart drew as much as the cockpit view');
+
+  // ...the status readout survives...
+  assert.ok(chart.texts().includes('SHLD'),
+    'the status column vanished on the chart screen');
+
+  // ...and the backdrop is drawn *before* that readout rather than over it.
+  const w = chartState.width;
+  const h = chartState.height;
+  const backdrop = chart.calls.findIndex((c) => c.name === 'fillRect'
+    && c.args[0] === 0 && c.args[1] === 0 && c.args[2] === w && c.args[3] === h);
+  const status = chart.calls.findIndex((c) => c.name === 'fillText' && c.args[0] === 'SHLD');
+  assert.ok(backdrop >= 0, 'the chart drew no full-screen backdrop');
+  assert.ok(status > backdrop,
+    'the status readout is drawn under the chart backdrop, so the backdrop dims it');
+});
+
+test('the chart legend sits clear of the message log', () => {
+  // Both live at the bottom of the screen. The legend used to be left-aligned
+  // in the corner the message log occupies; now that the log is drawn *after*
+  // the chart, a left-aligned legend would be covered by it.
+  const ctx = recordingContext();
+  const state = {
+    ...fullState(),
+    showChart: true,
+    messages: [{ text: 'Arrived: Lave', age: 0, lifetime: 5 }],
+    chart: {
+      discRadius: 260, jumpRange: 36, routes: [],
+      systems: [{ index: 0, name: 'HERE', x: 0, y: 0, danger: 0.1 }],
+      player: { index: 0 }, selected: -1,
+    },
+  };
+  H.drawHud(ctx, state);
+  const legend = ctx.calls.find((c) => c.name === 'fillText'
+    && c.args[0] === H.CHART_LEGEND);
+  assert.ok(legend, 'the chart legend was not drawn');
+  assert.equal(legend.args[1], state.width / 2,
+    'the legend is not centred, so it collides with the message log');
+});
