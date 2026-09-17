@@ -7,7 +7,7 @@
 | Установка | `npm install` |
 | Dev-сервер | `npm run dev` |
 | Сборка одного файла | `npm run build` → `dist/index.html` |
-| Юнит-тесты | `npm test` (625) |
+| Юнит-тесты | `npm test` (628) |
 | E2E | `npm run e2e` (51 проверка, headless Chrome) |
 | Симуляция экономики | `node scripts/economy-sim.mjs [прыжков]` |
 | Всё сразу | `npm run check` (тесты + сборка + e2e) |
