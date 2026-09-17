@@ -354,3 +354,53 @@ test('the default export mirrors the named ones', () => {
     assert.equal(typeof P.default[name], 'function', 'missing from default: ' + name);
   }
 });
+
+test('a save round-trips every field the player record has', () => {
+  // The classic silent bug: a field is added to `create()` and not to
+  // `serialize`, so it works all session and is gone after a reload. Nothing
+  // fails - the value is simply back to its default.
+  //
+  // This audit is how `dockedAt` was found. The last station was not saved, so
+  // a commander who had crossed the galaxy came back from a reload with the
+  // death screen offering to rescue them at Lave: `enterSystem` falls back to
+  // system 0 when it is null, and the boot used it to choose between the
+  // station screen and the title.
+  //
+  // Four fields are deliberately not written, and they are *named* here rather
+  // than filtered by a pattern, so that adding a fifth is a decision somebody
+  // makes rather than a silent omission.
+  const TRANSIENT = ['energy', 'energyMax', 'heat', 'missileMax'];
+
+  const fresh = P.create({ name: 'Roundtrip' });
+  const probe = P.create({ name: 'Roundtrip' });
+  let n = 0;
+  for (const key of Object.keys(fresh)) {
+    n += 1;
+    const current = probe[key];
+    if (typeof current === 'number') probe[key] = 1234 + n;
+    else if (typeof current === 'string') probe[key] = 'probe-' + n;
+    else if (typeof current === 'boolean') probe[key] = !current;
+    else if (Array.isArray(current)) probe[key] = [{ probeKey: n }];
+    // Objects get an extra key rather than being replaced: `deserialize` merges
+    // some of them into the defaults on purpose, and replacing the object would
+    // read as a lost field when nothing is wrong.
+    else if (current && typeof current === 'object') {
+      probe[key] = Object.assign({}, current, { probeKey: n });
+    }
+  }
+
+  const back = P.deserialize(P.serialize(probe));
+  const lost = Object.keys(fresh).filter(
+    (key) => !TRANSIENT.includes(key)
+      && JSON.stringify(probe[key]) !== JSON.stringify(back[key]));
+  assert.deepStrictEqual(lost, [],
+    'these fields do not survive a save: ' + lost.join(', '));
+
+  // And the transient list has to stay honest: a name in it that no longer
+  // exists in the record means somebody renamed a field and left the exemption
+  // behind, which would silently stop covering anything.
+  for (const key of TRANSIENT) {
+    assert.ok(Object.prototype.hasOwnProperty.call(fresh, key),
+      'the transient list exempts "' + key + '", which is not a field any more');
+  }
+});

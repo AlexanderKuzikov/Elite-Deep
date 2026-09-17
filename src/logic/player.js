@@ -387,6 +387,13 @@ function serialize(p) {
     standing: p.standing, wanted: p.wanted, currentSystem: p.currentSystem,
     visited: p.visited, systemMemory: p.systemMemory || {},
     contracts: p.contracts || [],
+    // The last station docked at. Was not saved, which meant a commander who
+    // had crossed the galaxy came back from a reload with the death screen
+    // offering to rescue them at Lave: `enterSystem` falls back to system 0
+    // when this is null, and the boot used it to decide whether to open on the
+    // station screen or the title. The value survived the session and vanished
+    // with the save.
+    dockedAt: p.dockedAt,
   });
 }
 
@@ -406,6 +413,9 @@ function deserialize(json) {
     visited: d.visited || { 0: 1 },
     systemMemory: Object.assign({}, d.systemMemory || {}),
     contracts: Array.isArray(d.contracts) ? d.contracts.slice() : [],
+    // `undefined` for a save written before this field existed, which is the
+    // same as `null`: the commander has not docked yet.
+    dockedAt: d.dockedAt === undefined ? null : d.dockedAt,
   });
   p._offences = d.offences || 0;
   return p;

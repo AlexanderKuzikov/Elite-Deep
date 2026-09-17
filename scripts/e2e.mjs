@@ -532,14 +532,23 @@ try {
     const g = window.__ELITE_GAME__;
     g.setMode('flight');
     g.player.cash = 4242;
+    // The last docked station has to survive too. It did not: a commander who
+    // had crossed the galaxy came back from a reload with the death screen
+    // offering to rescue them at Lave, because `enterSystem` falls back to
+    // system 0 when this is null.
+    g.player.dockedAt = 7;
     const wrote = g.save();
     g.player.cash = 1;
+    g.player.dockedAt = null;
     const read = g.load();
-    return { wrote: wrote, read: read, cash: g.player.cash };
+    return { wrote: wrote, read: read, cash: g.player.cash,
+      dockedAt: g.player.dockedAt };
   });
   check('the game saves', save.wrote === true);
   check('the game loads what it saved', save.read === true && save.cash === 4242,
     'cash ' + save.cash);
+  check('a save remembers the last station docked at', save.dockedAt === 7,
+    'dockedAt came back as ' + JSON.stringify(save.dockedAt));
 
   // --- Death and recovery -------------------------------------------------
   const death = await page.evaluate(() => {
