@@ -483,6 +483,16 @@ export function boot(host, options) {
     // contraband gets watched.
     const memory = REP.memoryFor(player, session.index);
 
+    // What the live contracts still need, by commodity.
+    //
+    // Computed once per call and keyed by id, rather than asked per row: the
+    // answer is the same for all nineteen rows, and `shoppingList` walks the
+    // contract list - doing that nineteen times per render, on every keystroke,
+    // to produce the same two numbers would be a waste the screen would feel.
+    const shopping = MISSIONS.shoppingList(player);
+    const needed = {};
+    for (const e of shopping) needed[e.commodity] = e;
+
     return raw.map((r) => {
       const com = r.com || {};
       const held = (player.cargo && player.cargo[com.id]) || 0;
@@ -508,6 +518,12 @@ export function boot(host, options) {
         reason: r.reason,
         held: held,
         avgPaid: PLAYER.costBasisOf(player, com.id),
+        // The shopping side of the same row: how much of this a contract in
+        // hand wants, and how much of that is still missing. Zero for the
+        // eighteen rows that nothing wants, which is what the market screen
+        // tests against before it prints anything.
+        contractTons: needed[com.id] ? needed[com.id].tons : 0,
+        contractShort: needed[com.id] ? needed[com.id].short : 0,
       };
     });
   }
@@ -515,6 +531,8 @@ export function boot(host, options) {
   /** Everything the station screen needs, assembled fresh on each open/update. */
   function stationState() {
     const legal = PLAYER.legalStatusFor(player._offences || 0);
+    const market = marketRows(player.day);
+    const shopping = MISSIONS.shoppingList(player);
     const standings = FACTIONS.FACTION_IDS
       .filter((id) => player.standing[id] !== undefined)
       .map((id) => ({ id: id, label: PLAYER.standingLabel(player.standing[id] || 0) }));
@@ -522,7 +540,8 @@ export function boot(host, options) {
     return {
       system: session.system,
       systemIndex: session.index,
-      market: marketRows(player.day),
+      market: market,
+      shoppingList: shopping,
       player: player,
       cash: player.cash,
       day: player.day,
@@ -551,6 +570,10 @@ export function boot(host, options) {
       contracts: MISSIONS.active(player).map((c) => Object.assign({}, c, {
         description: MISSIONS.describe(c),
         daysLeft: MISSIONS.daysLeft(c, player.day),
+        // Priced against the market the commander is standing in, because that
+        // is the market they can act on: the number is "what buying this
+        // mistake back would cost me, from here".
+        stake: MISSIONS.stakeOf(player, c, market),
       })),
       maxContracts: MISSIONS.MISSION.maxActive,
     };

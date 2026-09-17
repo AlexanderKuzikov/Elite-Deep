@@ -55,6 +55,12 @@ export const STATION_CSS = `
 .elite-table tr.selectable:hover td { background: rgba(159,232,255,0.09); }
 .elite-table tr.selected td { background: rgba(159,232,255,0.15); color: #e8f6ff; }
 .elite-table tr.no-stock td { color: rgba(159,232,255,0.28); }
+/* A line that belongs to the row above it rather than being one of its own.
+   No bottom border and no hover, or the eye reads it as another job. */
+.elite-table tr.elite-sub-row td {
+  padding-top: 0; padding-bottom: 8px; border-bottom: none;
+  background: none;
+}
 .elite-num { text-align: right; font-variant-numeric: tabular-nums; }
 .elite-good { color: #8affb0; }
 .elite-warn { color: #ffd27a; }
@@ -240,6 +246,15 @@ export function createStationUI(host, on) {
       if (row.illegal) {
         nameTd.appendChild(span(' [BANNED]', 'elite-bad'));
       }
+      // A contract the commander has already taken turns the market from a
+      // price list into a shopping list, and the screen has to say which rows
+      // those are. Measured before this existed: 145 of 145 cargo offers named
+      // a commodity that was not in the hold, and nothing on either screen said
+      // to go and buy it - the first news of it was the empty hold on arrival.
+      if (row.contractTons > 0) {
+        nameTd.appendChild(span('  NEEDED: ' + row.contractTons + ' t',
+          row.contractShort > 0 ? 'elite-warn' : 'elite-good'));
+      }
       tr.appendChild(nameTd);
 
       tr.appendChild(el('td', 'elite-num', row.available ? String(row.stock) : '-'));
@@ -274,6 +289,19 @@ export function createStationUI(host, on) {
       panel.appendChild(row('Legal status', legal.label, 'elite-bad'));
     }
     body.appendChild(panel);
+
+    // What the contracts in hand still need, and only when there is something
+    // to fetch. An empty panel would be noise on the screen where every row is
+    // a price.
+    const shopping = (s.shoppingList || []).filter((e) => e.short > 0);
+    if (shopping.length) {
+      const need = el('div', 'elite-panel');
+      need.appendChild(el('div', 'elite-dim', 'NEEDED FOR CONTRACTS'));
+      for (const e of shopping) {
+        need.appendChild(row(e.name, e.short + ' t of ' + e.tons + ' t'));
+      }
+      body.appendChild(need);
+    }
   }
 
   /**
@@ -353,8 +381,13 @@ export function createStationUI(host, on) {
 
     const table = el('table', 'elite-table');
     const head = el('tr');
-    for (const [label, cls] of [['Contract', ''], ['To', ''], ['Days', 'elite-num'],
-      ['Reward', 'elite-num'], ['', '']]) {
+    // `Jumps` sits next to `Days` on purpose: those two numbers are the whole
+    // decision. Distance in light years does not answer it - the ship jumps
+    // route edges, so a target 4 ly away can be three jumps and one 9 ly away
+    // can be one - and until this column existed the commander had to open the
+    // chart and count edges to find out.
+    for (const [label, cls] of [['Contract', ''], ['To', ''], ['Jumps', 'elite-num'],
+      ['Days', 'elite-num'], ['Reward', 'elite-num'], ['', '']]) {
       head.appendChild(el('th', cls, label));
     }
     table.appendChild(head);
@@ -370,6 +403,9 @@ export function createStationUI(host, on) {
       nameTd.lastChild.style.fontSize = '11px';
       tr.appendChild(nameTd);
       tr.appendChild(el('td', '', offer.targetName));
+      // A hop is a hop and a bounty goes nowhere, so "0" here reads as "you
+      // are already there" rather than as a missing value.
+      tr.appendChild(el('td', 'elite-num', String(offer.hops || 0)));
       tr.appendChild(el('td', 'elite-num', String(offer.days)));
       tr.appendChild(el('td', 'elite-num', offer.reward + ' CR'));
       // The last column says what Enter will do on this row, which is why the
@@ -391,10 +427,29 @@ export function createStationUI(host, on) {
       nameTd.lastChild.style.fontSize = '11px';
       tr.appendChild(nameTd);
       tr.appendChild(el('td', '', c.targetName));
+      tr.appendChild(el('td', 'elite-num', String(c.hops || 0)));
       tr.appendChild(el('td', 'elite-num ' + (c.daysLeft <= 1 ? 'elite-bad' : ''), String(c.daysLeft)));
       tr.appendChild(el('td', 'elite-num', c.reward + ' CR'));
       tr.appendChild(el('td', overdue ? 'elite-bad' : 'elite-warn', 'abandon'));
       table.appendChild(tr);
+
+      // The stake, not the reward, is what the deadline is worth.
+      //
+      // The fine is 35 % of the reward capped at 600, which is small enough
+      // that abandoning a big run beats flying it - so the reward printed above
+      // overstates what is at risk. What is really at risk is the fine *and*
+      // the cargo, which is already bought by the time the clock matters.
+      if (c.stake) {
+        const risk = el('tr', 'elite-sub-row');
+        const note = el('td', '', '');
+        note.colSpan = 6;
+        note.className = 'elite-dim';
+        note.style.fontSize = '11px';
+        note.textContent = 'at risk if overdue: ' + c.stake + ' CR';
+        note.appendChild(span(c.daysLeft < 0 ? '   OVERDUE' : '', 'elite-bad'));
+        risk.appendChild(note);
+        table.appendChild(risk);
+      }
     });
 
     body.appendChild(table);
@@ -404,8 +459,13 @@ export function createStationUI(host, on) {
     panel.appendChild(row('Cargo space',
       s.cargoUsed + ' / ' + s.hold + (s.cargoUsed >= s.hold ? '   (FULL)' : '')));
     body.appendChild(panel);
+    // The one line that was missing, and the reason #16 existed: a delivery
+    // contract does not load your hold, it checks it. Said here because this is
+    // the screen where the job is taken, and said in terms of what to do about
+    // it - the goods come off the market tab, at this station, before undocking.
     body.appendChild(el('div', 'elite-dim',
-      'A delivery needs the goods in your hold when you dock at the destination.'));
+      'Cargo contracts do not load your hold - they check it on arrival. '
+      + 'Buy the goods on the Market tab before you launch.'));
 
     // Keep the cursor inside the list after a contract is taken or dropped.
     const total = offers.length + live.length;

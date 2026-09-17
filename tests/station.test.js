@@ -672,19 +672,19 @@ function stateWithBoard(overrides) {
   return makeState({
     offers: [
       { id: 'o1', type: 'delivery', commodity: 'food', commodityName: 'Food', tons: 8,
-        targetIndex: 4, targetName: 'Ceeri', distance: 9.4, reward: 320, days: 8,
+        targetIndex: 4, targetName: 'Ceeri', distance: 9.4, hops: 3, reward: 320, days: 8,
         deadlineDay: 8, taken: false, description: 'Deliver 8 t of Food to Ceeri' },
       { id: 'o2', type: 'courier', targetIndex: 6, targetName: 'Orrere', distance: 14,
-        reward: 420, days: 5, deadlineDay: 5, taken: false,
+        hops: 1, reward: 420, days: 5, deadlineDay: 5, taken: false,
         description: 'Carry documents to Orrere (14 ly)' },
       { id: 'o3', type: 'relief', commodity: 'food', commodityName: 'Food', tons: 12,
-        targetIndex: 9, targetName: 'Diso', distance: 7, reward: 900, days: 6,
+        targetIndex: 9, targetName: 'Diso', distance: 7, hops: 2, reward: 900, days: 6,
         deadlineDay: 6, taken: true, description: 'Emergency: 12 t of Food to Diso' },
     ],
     contracts: [
       { id: 'o3', type: 'relief', commodity: 'food', tons: 12, targetIndex: 9,
-        targetName: 'Diso', reward: 900, deadlineDay: 6, daysLeft: 3,
-        description: 'Emergency: 12 t of Food to Diso' },
+        targetName: 'Diso', reward: 900, deadlineDay: 6, daysLeft: 3, hops: 2,
+        stake: 250, description: 'Emergency: 12 t of Food to Diso' },
     ],
     maxContracts: 4,
     ...(overrides || {}),
@@ -787,6 +787,83 @@ test('a board with nothing on it says so rather than rendering an empty table', 
   ui.open(makeState({ offers: [], contracts: [] }));
   ui.setTab('contracts');
   assert.ok(host.textContent.includes('No contracts'), 'an empty board said nothing');
+});
+
+test('every offer says how many jumps away its target is', () => {
+  // The decision at the board is "can I get there, and in how many days", and
+  // distance in light years cannot answer it: the ship jumps route edges, so a
+  // 9 ly target can be one hop and a 4 ly one can be three. Before this column
+  // the commander had to open the chart and count edges by hand.
+  const { ui, host } = freshUI();
+  ui.open(stateWithBoard());
+  ui.setTab('contracts');
+  const head = Array.from(host.querySelectorAll('th')).map((th) => th.textContent);
+  assert.ok(head.includes('Jumps'), 'the board has no Jumps column');
+  // The numbers are on the row, not merely in the header.
+  const rows = Array.from(host.querySelectorAll('tr.selectable'));
+  assert.ok(rows[0].textContent.includes('3'), 'the delivery row lost its jump count');
+});
+
+test('the board warns that a cargo contract checks the hold rather than filling it', () => {
+  // Measured before this line existed: 145 of 145 cargo offers named a
+  // commodity the commander did not hold, and nothing on the board or the
+  // market said to go and buy it. The mechanic - buy the goods yourself - is
+  // intended; leaving the commander to find out on arrival was not.
+  const { ui, host } = freshUI();
+  ui.open(stateWithBoard());
+  ui.setTab('contracts');
+  assert.ok(host.textContent.includes('do not load your hold'),
+    'the board does not say the goods have to be bought');
+  assert.ok(host.textContent.includes('Market tab'),
+    'the board does not say where to buy them');
+});
+
+test('a live contract states what is at risk, not just what it pays', () => {
+  // The reward is printed larger than the stake, which is misleading: the fine
+  // is 35 % of the reward capped at 600, so a commander can read a 900 CR
+  // contract and never see that missing it costs the cargo too.
+  const { ui, host } = freshUI();
+  ui.open(stateWithBoard());
+  ui.setTab('contracts');
+  assert.ok(host.textContent.includes('at risk if overdue: 250 CR'),
+    'the stake is not stated');
+});
+
+test('the market flags the rows a live contract needs', () => {
+  const { ui, host } = freshUI();
+  ui.open(makeState({
+    market: [
+      { id: 'food', name: 'Food', available: true, stock: 20, buyPrice: 4.2,
+        sellPrice: 3.6, held: 2, illegal: false, contractTons: 10, contractShort: 8 },
+      { id: 'minerals', name: 'Minerals', available: true, stock: 20, buyPrice: 12,
+        sellPrice: 9, held: 0, illegal: false, contractTons: 0, contractShort: 0 },
+    ],
+  }));
+  const text = host.textContent;
+  assert.ok(text.includes('NEEDED: 10 t'), 'the wanted commodity is not flagged');
+  // The row nothing wants must stay quiet, or the flag means nothing.
+  const foodRow = Array.from(host.querySelectorAll('tr'))
+    .find((tr) => tr.textContent.includes('Food'));
+  const mineralRow = Array.from(host.querySelectorAll('tr'))
+    .find((tr) => tr.textContent.includes('Minerals'));
+  assert.ok(foodRow.textContent.includes('NEEDED'), 'Food lost its flag');
+  assert.ok(!mineralRow.textContent.includes('NEEDED'),
+    'an unneeded commodity is flagged as needed');
+});
+
+test('the market panel lists what is still to be bought', () => {
+  const { ui, host } = freshUI();
+  ui.open(makeState({
+    shoppingList: [
+      { commodity: 'food', name: 'Food', tons: 10, held: 2, short: 8 },
+      { commodity: 'minerals', name: 'Minerals', tons: 4, held: 4, short: 0 },
+    ],
+  }));
+  const text = host.textContent;
+  assert.ok(text.includes('NEEDED FOR CONTRACTS'), 'the panel is missing');
+  assert.ok(text.includes('8 t of 10 t'), 'the shortfall is not shown');
+  // A line with nothing left to fetch is not a shopping list item.
+  assert.ok(!text.includes('0 t of 4 t'), 'a fully loaded commodity is still listed');
 });
 
 test('the board shows how many contracts are held out of the cap', () => {
