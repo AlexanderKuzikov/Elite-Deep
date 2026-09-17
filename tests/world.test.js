@@ -1741,3 +1741,51 @@ test('the gun has a range, and it is the one combat declares', () => {
   assert.ok(shootAt(C.FIRE_RANGE - 40, 1602) > 0,
     'a pirate inside the range did not fire');
 });
+
+// --- The AI must be reproducible -------------------------------------------
+
+test('the traffic simulation is reproducible', () => {
+  // Everything random in `stepTraffic` used `Math.random()`, which breaks the
+  // rule `rng.js` states at the top of the file - never use it for anything the
+  // player can observe twice - and made the AI unreproducible.
+  //
+  // The visible symptom was a *flaky test*: the engine-flame test measures the
+  // nose swinging, and a patrolling ship picks a random waypoint whenever its
+  // wander timer expires. It passed five times in isolation and failed once in
+  // a full run, which is the worst kind of test - one that teaches you to
+  // re-run instead of to read.
+  const run = () => {
+    const traffic = W.createTraffic(new THREE.Group(), home, 31);
+    const ship = traffic.spawn('pirate');
+    for (let i = 0; i < 300; i += 1) {
+      W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: 40000 },
+        1 / 60, { onEnemyShot() {} });
+    }
+    return {
+      x: ship.mesh.position.x, y: ship.mesh.position.y, z: ship.mesh.position.z,
+    };
+  };
+  assert.deepStrictEqual(run(), run(), 'two identical runs of the same traffic diverged');
+});
+
+test('nothing in the traffic simulation reaches for Math.random', () => {
+  // A throwing stub is the only way to be sure. A stray call would otherwise
+  // just make the run irreproducible without failing anything, which is how
+  // this survived so long.
+  //
+  // The stub goes on *after* the scene is built: three.js calls Math.random()
+  // in `generateUUID` for every new Object3D, so a global stub would fail
+  // inside three rather than inside the AI.
+  const traffic = W.createTraffic(new THREE.Group(), home, 31);
+  traffic.spawn('pirate');
+  const real = Math.random;
+  Math.random = () => { throw new Error('Math.random reached the simulation'); };
+  try {
+    for (let i = 0; i < 120; i += 1) {
+      W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: 40000 },
+        1 / 60, { onEnemyShot() {} });
+    }
+  } finally {
+    Math.random = real;
+  }
+});

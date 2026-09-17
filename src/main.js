@@ -2053,10 +2053,21 @@ export function boot(host, options) {
     session.time += dt;
     session.modeTime += dt;
 
-    // Age messages regardless of mode so they do not pop when a menu closes.
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      messages[i].age = (messages[i].age || 0) + dt;
-      if (messages[i].age > HUD.HUD_LAYOUT.messageLifetime) messages.splice(i, 1);
+    // Age messages in every mode *except the title*.
+    //
+    // The original reason for ageing them everywhere was right for menus: if
+    // they only aged in flight, docking and undocking would make a line jump
+    // its whole lifetime in one frame. But the title screen is not a pause in
+    // the game, it is the time *before* it - a new commander reads the controls
+    // there for as long as they like, and every message said at boot ("Arrived:
+    // Lave", the greeting, the rumour) expired while they read. Measured: after
+    // ten seconds on the title the log held **zero** entries, so the player
+    // launched into space with nothing but "Undocked from Lave Station".
+    if (session.mode !== MODE.TITLE) {
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        messages[i].age = (messages[i].age || 0) + dt;
+        if (messages[i].age > HUD.HUD_LAYOUT.messageLifetime) messages.splice(i, 1);
+      }
     }
 
     // Heat, energy and shields recover in every mode except death - a docked

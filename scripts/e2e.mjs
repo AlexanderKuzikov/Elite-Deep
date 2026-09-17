@@ -184,6 +184,31 @@ try {
   check('the scene has the starfield, lights and system group',
     stepped.sceneChildren >= 5, stepped.sceneChildren + ' children');
 
+  // --- The title screen is before the game, not a pause in it -------------
+  // Messages used to age in every mode, so everything said at boot - the
+  // arrival line, the greeting, the rumour - expired while a new commander was
+  // still reading the controls. Measured, the log held zero entries after ten
+  // seconds on the title, and the player launched with nothing but "Undocked".
+  const titleLog = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    const has = () => g.messages.some((m) => m.text === 'boot line');
+    g.setMode('title');
+    g.say('boot line', '#9fe8ff');
+    // Fifteen seconds of title screen - far longer than the 5.5 s lifetime.
+    for (let i = 0; i < 900; i += 1) g.step(1 / 60, 5000 + i / 60, { render: false });
+    const onTitle = has();
+    // And then six and a half seconds of flight, which is longer than it.
+    // The line is looked for *by text*: flight says things of its own, so
+    // "the log is empty" would be testing the wrong thing.
+    g.setMode('flight');
+    for (let i = 0; i < 400; i += 1) g.step(1 / 60, 5100 + i / 60, { render: false });
+    return { onTitle: onTitle, after: has() };
+  });
+  check('a message survives the title screen', titleLog.onTitle === true,
+    'still there after fifteen seconds on the title');
+  check('and then ages normally once the game starts', titleLog.after === false,
+    'gone after six seconds of flight');
+
   const shot0 = await page.screenshot({ path: join(shotDir, '01-flight.png') }).catch(() => null);
   check('a flight frame rendered without throwing', shot0 !== null);
 

@@ -861,6 +861,18 @@ export function createTraffic(scene, system, seed, options) {
     get trafficScale() { return trafficScale; },
     /** Extra hostiles the defended pocket keeps, 0 when no contract is open. */
     get pocket() { return pocket; },
+    /**
+     * The traffic's own seeded stream, so the AI is reproducible.
+     *
+     * `stepTraffic` used `Math.random()` for patrol waypoints, missile and gun
+     * cooldowns, which breaks the rule this project states at the top of
+     * `rng.js` - never use it for anything observable twice - and made the AI
+     * unreproducible. The visible symptom was a *flaky test*: the engine-flame
+     * test measures the nose swinging, and a patrolling ship picks a random
+     * waypoint whenever its wander timer expires, so the same test passed five
+     * times in isolation and failed once in a full run.
+     */
+    rand,
     spawn, topUp, prune, setPocket, dispose,
     seed,
   };
@@ -899,6 +911,11 @@ function tradeCargo(system, rand) {
  */
 export function stepTraffic(traffic, playerState, playerPos, dt, hooks) {
   const { ships, danger } = traffic;
+  // The traffic's own seeded stream where it has one. Everything random in this
+  // function used `Math.random()`, which made the AI unreproducible and made
+  // tests that depend on it flaky - see the note on `rand` in `createTraffic`.
+  // The fallback keeps hand-built traffic objects in tests working.
+  const rand = traffic.rand || Math.random;
   const hostilePatrols = !!(playerState && playerState.hostilePatrols);
 
   // Is a fight already happening nearby? One pass to find it, so the answer is
@@ -994,7 +1011,7 @@ export function stepTraffic(traffic, playerState, playerPos, dt, hooks) {
         z: s.mesh.position.z + (away.z / len) * 900,
       };
     } else {
-      aimPoint = patrolPoint(s, dt, danger);
+      aimPoint = patrolPoint(s, dt, danger, rand);
     }
 
     steerToward(s, aimPoint, dt);
@@ -1019,7 +1036,7 @@ export function stepTraffic(traffic, playerState, playerPos, dt, hooks) {
       // it almost never fires.
       if (lock > 0.93) {
         s.missiles -= 1;
-        s.missileCooldown = 9 + Math.random() * 9;
+        s.missileCooldown = 9 + rand() * 9;
         hooks.onEnemyMissile(s, {
           damage: C.ENEMY_MISSILE_DAMAGE,
           speed: C.ENEMY_MISSILE_SPEED,
@@ -1041,12 +1058,12 @@ export function stepTraffic(traffic, playerState, playerPos, dt, hooks) {
         // Aim is imperfect on purpose. A perfect NPC would be unbeatable and
         // joyless; this is what makes the dogfight survivable.
         const spread = 0.014 + (s.hostile ? 0 : 0.01);
-        const jitter = () => (Math.random() - 0.5) * spread;
+        const jitter = () => (rand() - 0.5) * spread;
         hooks.onEnemyShot(s, {
           x: nx + jitter(), y: ny + jitter(), z: nz + jitter(),
           damage: s.hostile ? 5 : 3,
         });
-        s.canFire = 0.75 + Math.random() * 0.9;
+        s.canFire = 0.75 + rand() * 0.9;
       } else {
         s.canFire = 0.2;
       }
@@ -1131,13 +1148,13 @@ function interceptPoint(s, playerPos, playerState) {
 }
 
 /** A slow circuit between the station, the belt and open space. */
-function patrolPoint(s, dt, danger) {
+function patrolPoint(s, dt, danger, rand) {
   s.wanderTimer -= dt;
   if (s.wanderTimer <= 0 || !s.waypoint) {
-    s.wanderTimer = 6 + Math.random() * 9;
-    const a = Math.random() * Math.PI * 2;
-    const r = 600 + Math.random() * 1800;
-    s.waypoint = { x: Math.cos(a) * r, y: (Math.random() - 0.5) * 500, z: Math.sin(a) * r };
+    s.wanderTimer = 6 + rand() * 9;
+    const a = rand() * Math.PI * 2;
+    const r = 600 + rand() * 1800;
+    s.waypoint = { x: Math.cos(a) * r, y: (rand() - 0.5) * 500, z: Math.sin(a) * r };
   }
   return s.waypoint;
 }
