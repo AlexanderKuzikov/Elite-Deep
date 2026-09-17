@@ -404,3 +404,51 @@ test('a save round-trips every field the player record has', () => {
       'the transient list exempts "' + key + '", which is not a field any more');
   }
 });
+
+// --- The shop must not lie about what it sells -----------------------------
+
+test('the beam laser does not claim what it does not do', async () => {
+  // It read "double damage, faster cycle, more heat". The damage is 1.7x (12
+  // against 7) and the cycle is *slower* (0.44 s against 0.35) - the design
+  // note in `combat.js` says the beam's advantage is "1.7x damage per shot in
+  // two thirds the shots". Two of three claims were wrong and one was
+  // backwards, on a 4000 CR item.
+  const C = await import('../src/logic/combat.js');
+  const pulse = C.LASERS.pulse;
+  const beam = C.LASERS.beam;
+  const desc = P.equipmentFor('beamLaser').desc;
+
+  assert.ok(beam.damage > pulse.damage, 'the beam should hit harder');
+  assert.ok(beam.cooldown > pulse.cooldown,
+    'the beam cycles slower - if that ever changes, the description has to change with it');
+  assert.ok(!/double damage/i.test(desc), 'the description claims double damage again');
+  assert.ok(!/faster cycle/i.test(desc), 'the description claims a faster cycle again');
+  assert.ok(/slower cycle/i.test(desc),
+    'the description no longer warns that the cycle is slower');
+});
+
+test('the scoop does not promise fuel skimming', async () => {
+  // The second half of its description was "and skim fuel from a star surface".
+  // Nothing implements it, and the star sits at 9000 units - which `LAYOUT`
+  // itself calls "pure backdrop, not reachable in a session". The name is the
+  // original's; the description has to be this hull's.
+  const W = await import('../src/sim/world.js');
+  const desc = P.equipmentFor('scoop').desc;
+  assert.ok(!/skim|fuel from a star/i.test(desc),
+    'the scoop promises fuel skimming again, and nothing implements it');
+  assert.ok(/cargo/i.test(desc), 'the scoop no longer says what it does collect');
+  // And the reason the promise is empty, pinned so it is not "fixed" by moving
+  // the star without thinking about the rest of the scene.
+  assert.ok(W.LAYOUT.starDistance > W.LAYOUT.beltOuter * 2,
+    'the star has moved close enough that skimming would be a different feature');
+});
+
+test('every item in the shop says what it does', () => {
+  for (const item of P.EQUIPMENT) {
+    assert.ok(item.id, 'an item has no id');
+    assert.ok(item.name, item.id + ' has no name');
+    assert.ok(typeof item.desc === 'string' && item.desc.length > 20,
+      item.id + ' has no usable description');
+    assert.ok(item.price > 0, item.id + ' is free');
+  }
+});

@@ -47,7 +47,13 @@ var EQUIPMENT = [
   },
   {
     id: 'scoop', name: 'Fuel Scoops', price: 1500, once: true,
-    desc: 'Collect cargo canisters and skim fuel from a star surface.',
+    // "and skim fuel from a star surface" was the second half of this, and it
+    // was never true. The scoop does collect cargo - `main.js` refuses a
+    // canister without it - but there is no skimming code anywhere, and the
+    // star sits at 9000 units, which `LAYOUT` calls "pure backdrop, not
+    // reachable in a session". The name is the original's; the description has
+    // to be this hull's.
+    desc: 'Recover cargo canisters and escape capsules from wrecks. Needs a free tonne of hold space.',
   },
   {
     id: 'shieldBoost', name: 'Shield Boosters', price: 2000, once: true,
@@ -59,7 +65,12 @@ var EQUIPMENT = [
   },
   {
     id: 'beamLaser', name: 'Beam Laser', price: 4000, once: true,
-    desc: 'Replaces the pulse laser: double damage, faster cycle, more heat.',
+    // It said "double damage, faster cycle, more heat". The damage is 1.7x
+    // (12 against 7), and the cycle is *slower* (0.44 s against 0.35) - the
+    // design note in `combat.js` says the beam's advantage is "1.7x damage per
+    // shot in two thirds the shots". Two of the three claims were wrong, and
+    // one of them backwards.
+    desc: 'Replaces the pulse laser: 1.7x damage a shot, at the cost of a slower cycle and more heat.',
   },
   {
     id: 'capsule', name: 'Escape Capsule', price: 1000, once: true,

@@ -112,7 +112,7 @@ const MISSILE = { speed: COMBAT.MISSILE_SPEED, life: COMBAT.MISSILE_LIFE, turn: 
 const PLAYER_HIT_RADIUS = 16;
 
 /** Modes. A string rather than an enum, so a debugger shows something readable. */
-export const MODE = {
+const MODE = {
   TITLE: 'title',
   FLIGHT: 'flight',
   DOCKED: 'docked',
@@ -2797,5 +2797,3 @@ if (typeof document !== 'undefined' && document.getElementById && !globalThis.__
     ready();
   }
 }
-
-export default { boot, MODE };
