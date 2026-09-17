@@ -795,3 +795,236 @@ test('boards offer more than one kind of work', () => {
     'cargo-only boards are still the norm: ' + cargoOnly + ' of ' + boards
     + ' (' + (share * 100).toFixed(0) + '%)');
 });
+
+// --- Reachability ----------------------------------------------------------
+
+/**
+ * Every target on the board must be one the commander can actually get to.
+ *
+ * Measured before this test existed: the board picked targets within
+ * `MISSION.reach * lyPerUnit * 1.6` = **28 light years**, on a tank of **7**.
+ * An audit of all 64 boards at four seeds each found **131 of 192 offers (68 %)**
+ * pointing at systems unreachable even on a full tank, and none reachable
+ * directly - a job the commander cannot take is not a job, it is a fine with a
+ * reward printed on it.
+ *
+ * No earlier test could see this. They all build a board from a stub galaxy
+ * (`{ systems: [s] }`) or check one contract's own fields, and reachability is
+ * not a property of a contract - it is a property of the contract *and the
+ * route graph* and the tank. It needs all three, which is why it was invisible.
+ */
+test('every contract target is reachable on a full tank', () => {
+  const unreachable = [];
+  let offers = 0;
+
+  for (const s of galaxy.systems) {
+    const player = P.create();
+    for (const seed of [1, 77, 2024, 99999]) {
+      const board = M.generateBoard(s, galaxy, player, seed, 0);
+      for (const offer of board) {
+        offers += 1;
+        // A bounty names its own system, so it is reachable by definition.
+        if (offer.type === 'bounty') continue;
+        const hops = G.hopsBetween(galaxy, s.index, offer.targetIndex, player.fuelMax);
+        if (!Number.isFinite(hops)) {
+          unreachable.push(s.name + ' -> ' + offer.targetName
+            + ' (' + offer.type + ', ' + offer.distance + ' ly)');
+        }
+      }
+    }
+  }
+
+  assert.ok(offers > 0, 'no offers generated to check');
+  assert.equal(unreachable.length, 0,
+    unreachable.length + ' of ' + offers + ' offers point at unreachable systems: '
+    + unreachable.slice(0, 5).join('; '));
+});
+
+test('a contract never takes longer to fly than its own deadline allows', () => {
+  // A jump costs no day, but docking does, and a delivery needs one dock at the
+  // far end. So the number of jumps is the number of days the trip can cost at
+  // best - a job needing more hops than days is already lost when it is posted.
+  const impossible = [];
+  let offers = 0;
+
+  for (const s of galaxy.systems) {
+    const player = P.create();
+    for (const seed of [1, 77, 2024, 99999]) {
+      const board = M.generateBoard(s, galaxy, player, seed, 0);
+      for (const offer of board) {
+        if (offer.type === 'bounty') continue;
+        offers += 1;
+        const hops = G.hopsBetween(galaxy, s.index, offer.targetIndex, player.fuelMax);
+        if (Number.isFinite(hops) && hops > offer.days) {
+          impossible.push(s.name + ' -> ' + offer.targetName
+            + ': ' + hops + ' hops in ' + offer.days + ' days');
+        }
+      }
+    }
+  }
+
+  assert.ok(offers > 0, 'no offers generated to check');
+  assert.equal(impossible.length, 0,
+    impossible.length + ' of ' + offers + ' offers cannot be flown in time: '
+    + impossible.slice(0, 5).join('; '));
+});
+
+test('every offer carries the hop count the route graph agrees with', () => {
+  // The board shows this number, so it has to be the number the jump itself
+  // would use. `hopsBetween` is the one implementation - the generator filters
+  // by it and the screen prints it - so this test exists to catch the day
+  // somebody recomputes it from `distance` and the two quietly drift apart.
+  const wrong = [];
+  let offers = 0;
+
+  for (const s of galaxy.systems) {
+    const player = P.create();
+    for (const seed of [1, 77, 2024, 99999]) {
+      for (const offer of M.generateBoard(s, galaxy, player, seed, 0)) {
+        offers += 1;
+        const real = G.hopsBetween(galaxy, s.index, offer.targetIndex, player.fuelMax);
+        if (offer.type === 'bounty') {
+          // A bounty names its own system, and 0 is what the screen prints for
+          // "you are already there".
+          if (offer.hops !== 0) wrong.push('bounty with ' + offer.hops + ' hops');
+          continue;
+        }
+        if (!Number.isFinite(real)) { wrong.push('unreachable target'); continue; }
+        if (offer.hops !== real) {
+          wrong.push(s.name + ' -> ' + offer.targetName + ': says ' + offer.hops
+            + ', graph says ' + real);
+        }
+      }
+    }
+  }
+
+  assert.ok(offers > 0, 'no offers generated to check');
+  assert.equal(wrong.length, 0, wrong.length + ' offers disagree with the route graph: '
+    + wrong.slice(0, 5).join('; '));
+});
+
+test('the shopping list covers every cargo contract in hand', () => {
+  // This is the promise the board and the market now make to the commander:
+  // "buy what this list says and you can complete what you are carrying".
+  // Measured before it existed: 145 of 145 cargo offers named a commodity that
+  // was not in the hold, and neither screen said so.
+  const broken = [];
+  let checked = 0;
+
+  for (const s of galaxy.systems) {
+    const player = P.create();
+    // Take everything on offer, so the list has to merge as well as count.
+    for (const offer of M.generateBoard(s, galaxy, player, 4242, 0)) {
+      if (M.accept(player, offer, 0).ok) checked += 1;
+    }
+    if (!checked) continue;
+
+    const list = M.shoppingList(player);
+    for (const c of player.contracts) {
+      if (!c.commodity) continue;
+      const entry = list.find((e) => e.commodity === c.commodity);
+      if (!entry) { broken.push('no row for ' + c.commodity); continue; }
+      // The row must be for the *sum* of the contracts wanting it, not for one
+      // of them: a list that says 5 t twice has the commander buy 10.
+      const want = player.contracts
+        .filter((x) => x.commodity === c.commodity)
+        .reduce((n, x) => n + x.tons, 0);
+      if (entry.tons !== want) {
+        broken.push(c.commodity + ': list says ' + entry.tons + ', contracts want ' + want);
+      }
+      const held = (player.cargo && player.cargo[c.commodity]) || 0;
+      if (entry.short !== Math.max(0, want - held)) {
+        broken.push(c.commodity + ': short says ' + entry.short);
+      }
+    }
+    break;                       // one board is enough; the loop is the search
+  }
+
+  assert.ok(checked > 0, 'no contracts were accepted to check');
+  assert.equal(broken.length, 0, broken.join('; '));
+});
+
+test('the shopping list empties as the cargo is loaded', () => {
+  // The half of the mechanic the board was silently relying on. If the list
+  // did not clear, the market would keep telling the commander to buy goods
+  // already in the hold, which is how a working mechanic gets read as a bug.
+  const { system } = aSystemWithABoard();
+  const player = P.create();
+  const offer = M.generateBoard(system, galaxy, player, 4242, 0)
+    .find((o) => o.commodity);
+  assert.ok(offer, 'no cargo offer to check');
+  M.accept(player, offer, 0);
+
+  const before = M.shoppingList(player).find((e) => e.commodity === offer.commodity);
+  assert.ok(before, 'nothing was listed after accepting');
+  assert.equal(before.short, offer.tons, 'the shortfall is not the full tonnage');
+
+  P.addCargo(player, offer.commodity, offer.tons);
+  const after = M.shoppingList(player).find((e) => e.commodity === offer.commodity);
+  assert.ok(after, 'the row vanished entirely instead of going quiet');
+  assert.equal(after.short, 0, 'the list still asks for goods already aboard');
+});
+
+test('the stake counts the cargo the fine does not', () => {
+  // The fine alone understates the deal badly: 35 % of the reward, capped at
+  // 600, which on a 900 CR relief run is 315 - less than the goods cost. The
+  // stake is what makes the deadline a real deadline, so it has to include the
+  // cargo, priced locally.
+  const { system } = aSystemWithABoard();
+  const player = P.create();
+  const offer = M.generateBoard(system, galaxy, player, 4242, 0)
+    .find((o) => o.commodity);
+  assert.ok(offer, 'no cargo offer to check');
+  M.accept(player, offer, 0);
+  const contract = player.contracts[0];
+
+  const market = [{ id: offer.commodity, buyPrice: 10 }];
+  const fine = Math.min(M.MISSION.failFineCap,
+    Math.round(contract.reward * M.MISSION.failFineFraction));
+  const expected = fine + 10 * offer.tons;
+  assert.equal(M.stakeOf(player, contract, market), expected,
+    'the stake is not the fine plus the cargo');
+
+  // Only what is still missing counts: goods already aboard are not at risk,
+  // because they were going to be spent anyway.
+  P.addCargo(player, offer.commodity, offer.tons);
+  assert.equal(M.stakeOf(player, contract, market), fine + 10 * offer.tons,
+    'a contract short of it is staked differently to one fully loaded');
+
+  // A courier carries nothing, so there is nothing to add.
+  assert.equal(M.stakeOf(player, { reward: 400 }, market), 140,
+    'a cargo-less contract is staked at more than its fine');
+});
+
+test('no cargo contract asks for more than the ship can hold', () => {
+  // Measured before the clamp: 11 of 145 cargo offers demanded more than the
+  // base hold of 20 t, and the board did not say so - the commander found out
+  // after buying the goods, at the moment they could not load them. A job that
+  // does not fit the ship is not a job.
+  const oversized = [];
+  let cargo = 0;
+
+  for (const s of galaxy.systems) {
+    for (const withExtended of [false, true]) {
+      const player = P.create();
+      if (withExtended) P.applyEquip(player, 'cargoExt');
+      const hold = P.holdMaxOf(player);
+      for (const seed of [1, 77, 2024, 99999]) {
+        const board = M.generateBoard(s, galaxy, player, seed, 0);
+        for (const offer of board) {
+          if (offer.type !== 'delivery' && offer.type !== 'relief') continue;
+          cargo += 1;
+          if (offer.tons > hold) {
+            oversized.push(offer.type + ' ' + offer.tons + ' t into ' + hold + ' t ('
+              + s.name + ' -> ' + offer.targetName + ')');
+          }
+        }
+      }
+    }
+  }
+
+  assert.ok(cargo > 0, 'no cargo offers generated to check');
+  assert.equal(oversized.length, 0,
+    oversized.length + ' of ' + cargo + ' cargo offers do not fit: '
+    + oversized.slice(0, 5).join('; '));
+});

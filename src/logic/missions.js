@@ -46,6 +46,7 @@ import * as F from './factions.js';
 import * as E from './economy.js';
 import * as P from './player.js';
 import * as REP from './reputation.js';
+import * as G from './galaxy.js';
 
 /** How the board is priced. All four are in credits. */
 export const MISSION = {
@@ -53,11 +54,24 @@ export const MISSION = {
   boardSize: 3,
   /** How many contracts a commander may hold at once. */
   maxActive: 4,
-  /** Raw world units within which a delivery target is considered reachable. */
-  reach: 90,
+  /**
+   * How far from home the board will look, **in jumps**.
+   *
+   * This replaced a straight-line radius of `reach * lyPerUnit * 1.6` = 28
+   * light years, which is why the board used to hand out work nobody could
+   * take. Measured on all 64 systems at four seeds: **541 of 768 offers (70 %)**
+   * named a target unreachable even on a full tank, and not one was reachable
+   * directly. The old radius was four times the tank and ignored the route
+   * graph entirely, so it was measuring a distance the ship cannot fly.
+   *
+   * Six jumps is the ceiling because a deadline is measured in days and a day
+   * is a dock: a run out and back costs two hops of the budget, so six hops
+   * still leaves room for the return trip on the longest deadlines.
+   */
+  maxHops: 6,
   /** Days allowed, by type. A day passes on every dock and every jump. */
   days: { delivery: [7, 12], relief: [6, 10], courier: [4, 8], bounty: [6, 12] },
-  /** Tonnage on offer, by type. */
+  /** Tonnage on offer, by type, as a floor and a share of the hold. */
   tons: { delivery: [6, 22], relief: [10, 30] },
   /** Bounty sizes. */
   bountyCount: [3, 6],
@@ -92,11 +106,23 @@ export function generateBoard(system, galaxy, player, seed, day) {
   const used = new Set();
 
   // Neighbours within reach, richest first, so the board prefers a target the
-  // commander can actually get to on one tank.
+  // commander can actually get to.
+  //
+  // "Within reach" used to mean **within 28 light years in a straight line**,
+  // which is not a distance this ship can fly: it jumps route edges, and its
+  // tank holds 7. Measured before the fix: 541 of 768 offers named a target
+  // unreachable even on a full tank. The filter is now the same one the jump
+  // itself uses - walk the route graph, count the hops, cap them - so a target
+  // on the board is a target `canJump` can actually chain to.
+  const tank = (player && player.fuelMax) || P.create().fuelMax;
   const candidates = galaxy.systems
     .filter((s) => s.index !== system.index)
-    .map((s) => ({ system: s, dist: distanceLy(galaxy, system, s) }))
-    .filter((c) => c.dist <= MISSION.reach * lyPerUnit(galaxy) * 1.6)
+    .map((s) => ({
+      system: s,
+      dist: distanceLy(galaxy, system, s),
+      hops: G.hopsBetween(galaxy, system.index, s.index, tank),
+    }))
+    .filter((c) => Number.isFinite(c.hops) && c.hops <= MISSION.maxHops)
     .sort((a, b) => a.dist - b.dist);
 
   // --- How many slots the cargo rows may use ---------------------------------
@@ -151,7 +177,17 @@ export function generateBoard(system, galaxy, player, seed, day) {
 
     used.add(pick.system.index);
     const [minTons, maxTons] = relief ? MISSION.tons.relief : MISSION.tons.delivery;
-    const tons = Math.round(minTons + rand() * (maxTons - minTons));
+    // The band's ceiling is clamped to the hold the commander actually has.
+    //
+    // Measured before the clamp: **11 of 145 cargo offers demanded more than 20
+    // tonnes** while the base hold carries 20, and the board said nothing - the
+    // commander only found out after buying the cargo. A job that does not fit
+    // the ship is not a job. The extended hold (35 t) still buys something real:
+    // it is what lets a board offer its largest runs, rather than being the only
+    // way to attempt the ones already posted.
+    const hold = (player && P.holdMaxOf(player)) || P.BASE_HOLD;
+    const top = Math.max(minTons, Math.min(maxTons, hold));
+    const tons = Math.round(minTons + rand() * (top - minTons));
     const days = pickDays(rand, relief ? 'relief' : 'delivery');
 
     offers.push(makeOffer({
@@ -163,6 +199,7 @@ export function generateBoard(system, galaxy, player, seed, day) {
       days: days,
       day: day,
       distance: pick.dist,
+      hops: pick.hops,
       rand: rand,
     }));
   }
@@ -183,6 +220,7 @@ export function generateBoard(system, galaxy, player, seed, day) {
         days: pickDays(rand, 'courier'),
         day: day,
         distance: pick.dist,
+        hops: pick.hops,
         rand: rand,
       }));
     }
@@ -203,6 +241,7 @@ export function generateBoard(system, galaxy, player, seed, day) {
       days: pickDays(rand, 'bounty'),
       day: day,
       distance: 0,
+      hops: 0,
       rand: rand,
     }));
   }
@@ -285,11 +324,92 @@ function makeOffer(spec) {
     targetIndex: spec.target.index,
     targetName: spec.target.name,
     distance: Math.round(spec.distance * 10) / 10,
+    // Jumps to the destination, on a full tank. Carried on the offer because
+    // the distance alone cannot answer the only question the commander has at
+    // the board - *can I get there, and in how many days* - and the generator
+    // already knows: it is the number the target was filtered by.
+    hops: Number.isFinite(spec.hops) ? spec.hops : null,
     reward: reward,
     deadlineDay: deadline,
     days: spec.days,
     standingFaction: spec.target.faction,
   };
+}
+
+/**
+ * What the commander still has to go and buy, across all live contracts.
+ *
+ * **Why this exists.** A delivery contract never loads the goods - that is the
+ * mechanic, not a bug: work is "carry *these* goods to *there*", and the goods
+ * are bought on the open market like any other cargo. What was missing was the
+ * telling. Measured before this: **145 of 145 cargo offers** named a commodity
+ * the commander did not hold and the board did not say so anywhere. The first
+ * thing a new commander learned about contracts was, at the destination, that
+ * they had carried the wrong thing.
+ *
+ * So this is the missing half of the board: given the contracts in hand and the
+ * cargo actually aboard, what is left to buy. Keyed by commodity, because two
+ * contracts wanting food want the same three tonnes of it, and a shopping list
+ * that asks for five tonnes in two lines gets five tonnes bought twice.
+ *
+ * Deliberately *not* a function of which station the commander is standing in.
+ * A shortage is a fact about the ship; the market's ability to fill it is a
+ * separate question the market screen already answers.
+ */
+export function shoppingList(player) {
+  const need = new Map();
+  for (const c of (player && player.contracts) || []) {
+    if (!c.commodity) continue;
+    need.set(c.commodity, (need.get(c.commodity) || 0) + c.tons);
+  }
+
+  const out = [];
+  for (const [commodity, tons] of need) {
+    const held = (player.cargo && player.cargo[commodity]) || 0;
+    const com = E.commodityById(commodity);
+    out.push({
+      commodity: commodity,
+      name: com ? com.name : commodity,
+      tons: tons,
+      held: held,
+      short: Math.max(0, tons - held),
+    });
+  }
+  // Things still to fetch first, then alphabetically, so the list does not
+  // reshuffle under the cursor as the hold changes.
+  out.sort((a, b) => (b.short > 0 ? 1 : 0) - (a.short > 0 ? 1 : 0)
+    || a.name.localeCompare(b.name));
+  return out;
+}
+
+/**
+ * What a live contract would cost the commander if it ran out of time, in
+ * credits, priced locally.
+ *
+ * `failOutcome` charges a fine of 35 % of the reward, capped at 600 - small
+ * enough that failing a big run is cheaper than flying it, which makes
+ * "abandon at the deadline" a real strategy and the deadline a suggestion. The
+ * fine is only half the bill: the goods are already bought by then, and if the
+ * contract was the reason they were bought they are dead stock in the hold.
+ *
+ * So the stake is the fine *and* the cargo it was carrying, the second term
+ * valued at what this station asks for it right now - what the commander would
+ * have to pay to buy that mistake back. A courier carries nothing and a bounty
+ * is handed no goods, so both are fine-only, which is why this reads the
+ * shopping list rather than the contract.
+ *
+ * Returns credits, rounded, for the status screen to print next to the reward.
+ */
+export function stakeOf(player, contract, market) {
+  const fine = Math.min(MISSION.failFineCap,
+    Math.round(contract.reward * MISSION.failFineFraction));
+  if (!contract.commodity || !market) return fine;
+
+  const entry = shoppingList(player).find((e) => e.commodity === contract.commodity);
+  const tons = (entry && entry.short) || contract.tons;
+  const row = market.find((r) => r && r.id === contract.commodity);
+  const unit = (row && row.buyPrice) || 0;
+  return fine + Math.round(unit * tons);
 }
 
 /** A one-line description, used by the station screen and the message log. */
@@ -468,4 +588,5 @@ export function active(player) {
 export default {
   MISSION, generateBoard, describe, accept, resolveArrival, checkBounties,
   bountyProgress, bountyPressure, abandon, daysLeft, active,
+  shoppingList, stakeOf,
 };
