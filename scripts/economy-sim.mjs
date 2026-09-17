@@ -29,37 +29,61 @@
  * | career                | final    | growth/jump | trade | contracts |
  * |-----------------------|----------|-------------|-------|-----------|
  * | trade only            | 10 627   | 1.23 %      | 100 % | 0 %       |
- * | + jobs, best pay first|  5 492   | 0.35 %      |  34 % | 66 %      |
- * | + jobs, cargo first   |  3 239   | 0.39 %      |  63 % | 37 %      |
+ * | + jobs, best pay first|  4 573   | 0.32 %      |  35 % | 65 %      |
+ * | + jobs, cargo first   |  3 312   | 1.31 %      |  76 % | 24 %      |
  *
  * Three things worth knowing:
  *
- *   1. **Contracts are not a side dish.** For a commander who takes them they
- *      are up to **66 % of income**. That is the answer to the question this
- *      script could not previously ask.
- *   2. **Taking jobs still ends with less cash than pure trading** - 5 492
+ *   1. **Contracts are a real share of income.** For a commander who takes them
+ *      they are **65 % of income** - but see the next point, because the share
+ *      is not the same thing as the outcome.
+ *   2. **Taking jobs still ends with less cash than pure trading** - 4 573
  *      against 10 627. Two reasons, and neither is that contracts pay badly:
  *      the job-taking career spends **11 800 CR on equipment** (six items) and
- *      stands still for **81 of its 120 days** clearing pirates. Standing still
+ *      stands still for **76 of its 120 days** clearing pirates. Standing still
  *      earns nothing.
  *   3. **Cleanups dominate by reward**, so a reward-greedy commander takes
- *      sixteen of them and no cargo jobs at all. Every other job type is
- *      strictly worse per day.
+ *      fifteen of them and one relief run, and no cargo jobs at all. Every
+ *      other job type is strictly worse per day.
  *
- * **Read the 120-jump table as the *early* game.** At 200 jumps the two job
- * columns close most of the gap - 14 201 against 17 482, 0.56 % against 0.73 %
- * per jump - because the equipment is a one-off cost that then keeps paying
- * (the cargo-first career, which buys less, grows at the same 0.73 % as pure
- * trading). So "taking jobs makes you poorer" is true for the first hundred
- * jumps and false afterwards, which is a different sentence and a more useful
- * one.
+ * **Read the 120-jump table as the *early* game.** At **800** jumps the
+ * best-pay career overtakes pure trading - 72 280 against 69 516 - because the
+ * equipment is a one-off cost that then keeps paying, and by then both have
+ * settled to a crawl (0.20 % against 0.19 % per jump, which is what a mature
+ * economy looks like). Note that the *final* figure is not where the difference
+ * shows: at 120 jumps the gap is 2.3x and at 800 there is none. So "taking jobs
+ * makes you poorer" is true for the first few hundred jumps and false
+ * afterwards, which is a different sentence and a more useful one.
+ *
+ * ## The cargo-first column is broken, and it is the *clock* that broke it
  *
  * The cargo-first column exists to check the instrument rather than to model a
  * player: if cargo jobs never complete when chosen *first*, the cargo path in
- * this sim is broken rather than unprofitable. Two deliveries did complete, so
- * the path works - but five failed, which is the feasibility check being
- * optimistic (it counts hops on a *full* tank, while refuelling costs money and
- * detours).
+ * this sim is broken rather than unprofitable. At 120 jumps it shows **8
+ * deliveries and 6 relief runs completed against 8 failures** - and at 800
+ * jumps, **62 completed against 61 failures**, with contract income *negative*
+ * (-18 975 CR by the flow accounting). That is not "contracts pay badly". It is
+ * this sim refusing to let them be delivered.
+ *
+ * The cause is the day model, not the economy. **This loop spends a day on
+ * every jump**, while `MISSION.days` is set for the game's model where a day is
+ * a *dock* and a jump costs no time at all (`decayDay` fires on `dock`).
+ * Deadlines sized for "six docks" therefore expire after six *jumps*, and a
+ * multi-hop run is late before it arrives.
+ *
+ * A second defect compounds it: a cleanup job parks the ship for `tons + 1`
+ * days, but `resolveArrival` only checks `day > deadlineDay` once the commander
+ * is back in the target system. So a six-tonne delivery can go overdue while
+ * the ship sits in someone else's port, and only finds out later.
+ *
+ * Neither is a balance finding, and the reward formula is not implicated: on
+ * live boards **only 55 of 3 680 offers** are too tight for a round trip, so in
+ * the game the window is generous. Fix the clock here and the deadline check
+ * there before reading the cargo column as an economic verdict.
+ *
+ * The cargo-first column's own numbers should be treated as **fiction until
+ * then** - it is measuring "can this loop finish a job", not "is a job worth
+ * taking".
  *
  * ## What this does not model
  *
