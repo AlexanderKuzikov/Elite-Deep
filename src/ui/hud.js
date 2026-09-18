@@ -842,6 +842,26 @@ export const CHART_LEGEND =
   'O = close   H = hyperspace   arrows/WASD = move cursor   T/G = step';
 
 /**
+ * What the HUD says when the pointer is not captured.
+ *
+ * Deliberately a separate string from `TITLE_CONTROLS`, and deliberately not
+ * passed through `hud.test.js`'s key scan: "click" and "Esc" are not keys the
+ * game binds, and a scanner that reads every capital letter as a key promise
+ * would flag them. The promise made here is a *mouse* promise - a click - and
+ * the one key it names is checked by hand in the test.
+ */
+export const MOUSE_HINT = {
+  /** Nothing captured yet: the click is the gesture that captures it. */
+  capture: 'CLICK TO FLY WITH THE MOUSE',
+  /** Flight, pointer free. Same promise as above, said from the cockpit. */
+  manual: 'KEYBOARD STEERING   CLICK TO FLY WITH THE MOUSE',
+  /** The browser said no. Saying "click" again would be a lie. */
+  refused: 'MOUSE CAPTURE REFUSED BY THE BROWSER   KEYBOARD STEERING',
+  /** Not drawn today: kept as the place the release key is documented. */
+  flying: 'MOUSE STEERS   ESC RELEASES THE POINTER',
+};
+
+/**
  * The key legend on the title screen. Same reasoning as `CHART_LEGEND`.
  */
 export const TITLE_CONTROLS = [
@@ -1033,7 +1053,7 @@ export function leadPip(screen, targetScreenVelocity, timeToImpact, maxOffset) {
 }
 
 export default {
-  HUD_COLOURS, HUD_LAYOUT, CHART_LEGEND, TITLE_CONTROLS,
+  HUD_COLOURS, HUD_LAYOUT, CHART_LEGEND, TITLE_CONTROLS, MOUSE_HINT,
   drawHud, drawChartOverlay, drawDockingGuide,
   formatDistance, projectToScreen, leadPip, hudScale, countOf, hudOverlayFor,
 };

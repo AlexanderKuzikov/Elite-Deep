@@ -94,6 +94,17 @@ const HYPERSPACE_DURATION = 2.6;
 /** Seconds of invulnerability after arriving in a new system (friendlier). */
 const ARRIVAL_GRACE = 3.0;
 
+/**
+ * How long the mouse hint stays on screen once flight begins without a captured
+ * pointer, in seconds.
+ *
+ * Long enough to read a short line while also flying, short enough that it does
+ * not become furniture at the bottom of the view. The pointer being released
+ * mid-session is not on a timer at all: it stays until the lock is taken back,
+ * because that is the state the player has to fix.
+ */
+const MOUSE_HINT_SECONDS = 8;
+
 /** How often the traffic layer tops up, in seconds. */
 const TRAFFIC_INTERVAL = 6;
 
@@ -161,10 +172,21 @@ export function boot(host, options) {
   log(`renderer: ${renderer.mode}${renderer.mode === 'none' ? ' (' + (renderer.probe && renderer.probe.reason) + ')' : ''}`);
 
   // --- Input --------------------------------------------------------------
-  // Pointer lock is requested on the canvas, but key events must reach us even
-  // when the canvas is not focused, so the window is the key target.
+  // Key events must reach us even when the canvas is not focused, so the window
+  // is the key target. The *pointer*, on the other hand, can only be locked to
+  // an element - the window has no `requestPointerLock` at all - so the canvas
+  // is the lock target. The two were the same object until now, which is why
+  // the mouse could never be captured: every request went to the window and
+  // quietly returned false.
+  //
+  // The target is the world canvas and not the HUD one. Only the world canvas
+  // receives clicks: the HUD sits above it with `pointer-events: none` so that
+  // it can draw over the screen without stealing them. A lock held there would
+  // work and then lose the mouse on the next click, because the element under
+  // the cursor is never the one that took it.
   const input = INPUT.createInput(typeof window !== 'undefined' ? window : null, {
     mouse: opts.mouse !== false,
+    pointerTarget: canvas,
   });
 
   // --- Audio --------------------------------------------------------------
@@ -239,6 +261,77 @@ export function boot(host, options) {
     // the system group, so nothing else would.
     systemLights: [],
   };
+
+  // -------------------------------------------------------------------------
+  // Mouse capture
+  // -------------------------------------------------------------------------
+
+  /**
+   * Where the mouse hint lives.
+   *
+   * `hintUntil` is a wall time in `session.time`, not a countdown: two things
+   * set it and neither is in a position to tick it.
+   */
+  const mouseUI = {
+    captured: false,
+    hintUntil: 0,
+    /** Reasons already explained to the player. Never explained twice. */
+    saidManual: false,
+    saidRefused: false,
+  };
+
+  INPUT.addPointerLock(input, (locked) => {
+    mouseUI.captured = locked;
+    if (locked) {
+      // The player has the controls they asked for, so the instructions have
+      // done their job and go away.
+      mouseUI.hintUntil = 0;
+    }
+  });
+
+  /**
+   * Ask for the pointer, and only from a place where a gesture can back it.
+   *
+   * Every call site is a keypress or a click. A request with no gesture behind
+   * it is refused by the browser, and a refusal is sticky - the game stops
+   * asking - so a stray call here costs the player the mouse for the session.
+   */
+  function captureMouse() {
+    if (INPUT.mouseActive(input)) return true;
+    return INPUT.requestMouse(input);
+  }
+
+  /**
+   * The gesture that arms a capture, and where it has to be armed from.
+   *
+   * Two things have to line up. The listener has to be the capturing phase on
+   * the window, so it sees the click whatever element it lands on - and so it
+   * runs *before* the station screen's own handlers can stop it. And the lock
+   * itself has to be requested from inside that listener, because a request
+   * made anywhere else has no gesture behind it and the browser refuses it.
+   *
+   * A click is fought over here, and the arbitration is deliberate: clicking
+   * the canvas while flying means "take the pointer"; clicking while docked or
+   * on the chart means "use the screen", and nothing should be captured. There
+   * is no third case.
+   */
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('mousedown', () => {
+      if (session.mode !== MODE.FLIGHT) return;
+      captureMouse();
+    }, true);
+  }
+
+  /**
+   * Put the mouse hint on screen for the first seconds of flight.
+   *
+   * Only for the case where flight began without a captured pointer. A pointer
+   * released *during* flight needs no timer: the hint stays until it is taken
+   * back, because the player has just lost a control they were using.
+   */
+  function showMouseHint() {
+    mouseUI.hintUntil = session.time + MOUSE_HINT_SECONDS;
+  }
 
   // Messages: {text, colour, age, lifetime}. Newest last.
   const messages = [];
@@ -417,6 +510,11 @@ export function boot(host, options) {
     renderer.snapCamera(session.flight);
     stationUi.close();
     setMode(MODE.FLIGHT);
+    // A keypress got us here - the launch prompt, the station's undock, or the
+    // death screen - so this is a gesture and the browser will honour a lock
+    // request. Everything that starts flying has to go through here for that
+    // reason; a path that enters `flight` another way has no gesture to spend.
+    if (!captureMouse()) showMouseHint();
     play('undock');
     say('Undocked from ' + session.system.name + ' Station');
   }
@@ -1820,7 +1918,11 @@ export function boot(host, options) {
     if (INPUT.consume(input, 'targetPrev')) session.chartCursor = stepSystem(-1);
     if (INPUT.consume(input, 'chart') || INPUT.consume(input, 'dock')
       || INPUT.consume(input, 'leave')) {
+      // The key that closed the chart is also the gesture that may take the
+      // pointer back. Without this the chart is a one-way door: the only way to
+      // fly with the mouse again would be to dock and relaunch.
       setMode(MODE.FLIGHT);
+      if (!captureMouse()) showMouseHint();
       play('beep');
     }
     if (INPUT.consume(input, 'jump') || INPUT.consume(input, 'hyperspace')) {
@@ -2134,9 +2236,14 @@ export function boot(host, options) {
     );
     renderer.camera.lookAt(st.x, st.y, st.z);
 
+    // Until the launch key is handled below, the cursor is the player's. A
+    // frame that takes it earlier than the keypress both loses the gesture the
+    // browser demands and leaves the click that *would* count falling on a
+    // screen that claimed it was busy capturing.
     if (INPUT.consume(input, 'fire') || INPUT.consume(input, 'dock')) {
       armAudio();
       undock();
+      return;
     }
     if (INPUT.consume(input, 'throttleUp')) {
       // A new career wipes the save. Deliberate: it is the only destructive
@@ -2158,6 +2265,10 @@ export function boot(host, options) {
       enterSystem(player.dockedAt === null ? 0 : player.dockedAt, 'station');
       session.grace = ARRIVAL_GRACE;
       setMode(MODE.FLIGHT);
+      // Death released the pointer, and this keypress is the gesture that can
+      // take it back. Without this the player is resurrected into a ship they
+      // can only fly with the keyboard, with no explanation.
+      if (!captureMouse()) showMouseHint();
       say('Insurance claim processed. Ship replaced.', HUD.HUD_COLOURS.inkDim);
     }
   }
@@ -2402,6 +2513,41 @@ export function boot(host, options) {
   // Frame drawing
   // -------------------------------------------------------------------------
 
+  /**
+   * The mouse hint over the flight view.
+   *
+   * Three states, and it is worth being explicit about why there are three
+   * rather than one. A player whose pointer is captured needs no instructions.
+   * A player who just pressed Escape needs telling, urgently and briefly, how to
+   * get it back. A player flying without ever having had it - a trackpad, a
+   * browser that refused, a click that missed - needs the same sentence but
+   * without the accusation that they lost something.
+   */
+  function drawMouseHint(ctx) {
+    if (session.mode !== MODE.FLIGHT) return;
+    if (INPUT.mouseActive(input)) return;
+    const held = input.relockIn > 0;
+    if (!held && session.time >= mouseUI.hintUntil) return;
+
+    const text = input.lockFailed
+      ? HUD.MOUSE_HINT.refused
+      : (held ? HUD.MOUSE_HINT.manual : HUD.MOUSE_HINT.capture);
+    const k = HUD.hudScale(hudH);
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = (13 * k) + 'px "SF Mono", Consolas, monospace';
+    // Outlined rather than plated: like the message log, this line lands over
+    // whatever happens to be in the bottom of the view, which is often a lit
+    // station wall.
+    ctx.strokeStyle = HUD.HUD_COLOURS.plate;
+    ctx.lineWidth = 3;
+    ctx.strokeText(text, hudW / 2, hudH - 42 * k);
+    ctx.fillStyle = HUD.HUD_COLOURS.ok;
+    ctx.fillText(text, hudW / 2, hudH - 42 * k);
+    ctx.restore();
+  }
+
   function draw() {
     const state = hudState();
     hudCtx.clearRect(0, 0, hudW, hudH);
@@ -2420,6 +2566,7 @@ export function boot(host, options) {
       HUD.drawHud(hudCtx, state);
       if (session.mode === MODE.FLIGHT) HUD.drawDockingGuide(hudCtx, state);
       drawTracers(hudCtx);
+      drawMouseHint(hudCtx);
     }
     // 'none' - the station screen is a full-page overlay with its own status
     // readout, and nothing belongs behind it.
@@ -2518,6 +2665,14 @@ export function boot(host, options) {
     ctx.fillText(HUD.TITLE_CONTROLS[1], cx, cy + 154 * k);
     ctx.fillText('Press  R  at the title to start a new career (erases the save)',
       cx, cy + 184 * k);
+    // The keyboard table above says nothing about the mouse, and the mouse is
+    // the control most players reach for first. Shown only while the pointer is
+    // free: once it is captured the line has been acted on and repeating it
+    // would be one more thing competing with the station view.
+    if (!INPUT.mouseActive(input)) {
+      ctx.fillStyle = HUD.HUD_COLOURS.ok;
+      ctx.fillText(HUD.MOUSE_HINT.capture, cx, cy + 212 * k);
+    }
     ctx.restore();
   }
 
@@ -2536,6 +2691,13 @@ export function boot(host, options) {
       + '  -  ' + HUD.countOf(player.kills, 'kill'), hudW / 2, hudH / 2 + 20);
     ctx.fillStyle = HUD.HUD_COLOURS.warn;
     ctx.fillText('Press  M  to be rescued at your last station', hudW / 2, hudH / 2 + 60);
+    // The rescue launches straight into flight, so this is where the player
+    // learns that the mouse comes back with the ship.
+    if (!INPUT.mouseActive(input)) {
+      ctx.fillStyle = HUD.HUD_COLOURS.inkDim;
+      ctx.font = '13px "SF Mono", Consolas, monospace';
+      ctx.fillText(HUD.MOUSE_HINT.capture, hudW / 2, hudH / 2 + 92);
+    }
     ctx.restore();
   }
 

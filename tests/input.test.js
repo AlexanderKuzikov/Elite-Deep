@@ -23,6 +23,9 @@ function fakeWindow() {
     innerHeight: 900,
     documentElement: null,
     body: null,
+    // A canvas that exists, and can be locked.
+    isConnected: true,
+    lockRequests: 0,
     addEventListener(type, fn) {
       if (!listeners.has(type)) listeners.set(type, new Set());
       listeners.get(type).add(fn);
@@ -39,14 +42,74 @@ function fakeWindow() {
       for (const set of listeners.values()) n += set.size;
       return n;
     },
-    requestPointerLock() { this._lockRequested = true; },
+    requestPointerLock() { this.lockRequests += 1; },
   };
   return el;
+}
+
+/**
+ * The browser side of pointer lock: a `document` that knows which element is
+ * locked, and can tell the window that it changed.
+ *
+ * Without this the mouse cannot be tested at all. `pointerLocked` is set from
+ * `document.pointerLockElement`, so a test that only calls `requestPointerLock`
+ * measures its own stub.
+ */
+function fakeDocument(win) {
+  const listeners = new Map();
+  return {
+    pointerLockElement: null,
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(fn);
+    },
+    removeEventListener(type, fn) {
+      if (listeners.has(type)) listeners.get(type).delete(fn);
+    },
+    fire(type) {
+      const set = listeners.get(type);
+      if (set) for (const fn of set) fn({});
+      void win;
+    },
+    exitPointerLock() {
+      this.pointerLockElement = null;
+      this.fire('pointerlockchange');
+    },
+    /** Grant the lock to `el`, as the browser would. */
+    grant(el) {
+      this.pointerLockElement = el;
+      this.fire('pointerlockchange');
+    },
+  };
+}
+
+/**
+ * Attach a fake `document` for the duration of `body`, and take it away again.
+ *
+ * The module reads the global `document` directly - it has to, it is browser
+ * code - so the test has to own that global while it runs.
+ */
+function withDocument(body) {
+  const win = fakeWindow();
+  const doc = fakeDocument(win);
+  const had = 'document' in globalThis;
+  const previous = globalThis.document;
+  globalThis.document = doc;
+  try {
+    return body(win, doc);
+  } finally {
+    if (had) globalThis.document = previous; else delete globalThis.document;
+  }
 }
 
 /** A key event with the fields the module reads. */
 function key(code, extra) {
   return { code, ctrlKey: false, metaKey: false, altKey: false, preventDefault() {}, ...(extra || {}) };
+}
+
+/** A mousemove carrying only the deltas, which is all pointer lock delivers. */
+function move(dx, dy) {
+  return { movementX: dx, movementY: dy };
 }
 
 test('a fresh input state is idle', () => {
@@ -228,82 +291,139 @@ test('no key is bound to two conflicting movement actions', () => {
   }
 });
 
-test('the mouse is a centred virtual stick with a deadzone', () => {
-  const w = fakeWindow();
-  const s = I.createInput(w);
-  s.pointerLocked = true;
+// --- The mouse virtual stick -----------------------------------------------
 
-  // Dead centre: no deflection.
-  w.fire('mousemove', { clientX: 800, clientY: 450 });
-  let a = I.axes(s, 1 / 60);
-  assert.equal(a.roll, 0, 'a centred mouse should not steer');
+/** Build a locked, mouse-enabled input whose viewport height is `h`. */
+function capturedWindow(h) {
+  const win = fakeWindow();
+  win.innerHeight = h || 900;
+  const doc = fakeDocument(win);
+  return withDocumentOn(doc, () => {
+    // `pointerTarget` is the window stand-in here for the same reason the real
+    // game passes a canvas: the module only ever calls three things on it.
+    const state = I.createInput(win, { pointerTarget: win });
+    doc.grant(win);
+    return { win, doc, state };
+  });
+}
 
-  // A small offset inside the deadzone: still nothing.
-  w.fire('mousemove', { clientX: 800 + 1600 * 0.03, clientY: 450 });
-  a = I.axes(s, 1 / 60);
-  assert.equal(a.roll, 0, 'inside the deadzone the stick must stay centred');
+/**
+ * Run `body` with `doc` installed as the global `document`.
+ *
+ * The restore happens *after* the body, which matters: the grant has to be
+ * delivered while the module can still see the document that describes it.
+ */
+function withDocumentOn(doc, body) {
+  const had = 'document' in globalThis;
+  const previous = globalThis.document;
+  globalThis.document = doc;
+  try {
+    return body();
+  } finally {
+    if (had) globalThis.document = previous; else delete globalThis.document;
+  }
+}
 
-  // Far out: full deflection. Smoothing means it takes a few frames.
-  w.fire('mousemove', { clientX: 1600 - 4, clientY: 450 });
-  for (let i = 0; i < 240; i += 1) a = I.axes(s, 1 / 60);
-  assert.ok(a.roll > 0.8, 'pushing the mouse right should roll right, got ' + a.roll);
+test('the mouse is a spring-centred stick with a deadzone', () => {
+  // The whole model in one test. Under pointer lock there is no cursor
+  // position, so the stick is the *integral* of the movement - and it is a
+  // spring, not a ratchet: a push that stops ends.
+  const { win, doc, state } = capturedWindow();
+  assert.equal(state.pointerLocked, true, 'the pointer is not captured');
+
+  // A nudge well inside the deadzone: no turn at all. `MOUSE.deadzone` is a
+  // fraction of the stick, so the pixel threshold is deadzone / gain.
+  const insidePx = Math.floor(I.MOUSE.deadzone / I.MOUSE.gain * 0.5);
+  win.fire('mousemove', move(insidePx, 0));
+  assert.equal(I.axes(state, 1 / 60).roll, 0,
+    'a nudge of ' + insidePx + 'px steered the ship');
+
+  // A firm push to the right rolls right.
+  win.fire('mousemove', move(60, 0));
+  const pushed = I.axes(state, 1 / 60).roll;
+  assert.ok(pushed > 0, 'pushing the mouse right should roll right, got ' + pushed);
+
+  // Let go and it springs back. At 60 fps and a decay of 2.2 units/s, half a
+  // second is more than enough to reach centre from any deflection.
+  withDocumentOn(doc, () => {
+    for (let i = 0; i < 40; i += 1) I.axes(state, 1 / 60);
+  });
+  assert.equal(I.axes(state, 1 / 60).roll, 0, 'the stick did not spring back to centre');
+});
+
+test('a slower drag turns more gently than a fast one', () => {
+  // Proportionality is what makes the mouse usable rather than a light switch.
+  const gentle = capturedWindow();
+  gentle.win.fire('mousemove', move(30, 0));
+  const small = I.axes(gentle.state, 1 / 60).roll;
+
+  const hard = capturedWindow();
+  hard.win.fire('mousemove', move(30, 0));
+  hard.win.fire('mousemove', move(30, 0));
+  hard.win.fire('mousemove', move(30, 0));
+  const big = I.axes(hard.state, 1 / 60).roll;
+
+  assert.ok(big > small * 2, 'three times the mouse travel did not turn harder: '
+    + small + ' vs ' + big);
+});
+
+test('the stick saturates at the end of its travel', () => {
+  // Past full deflection the ship must not turn harder, or a fast flick would
+  // out-turn a held key.
+  const { win, state } = capturedWindow();
+  for (let i = 0; i < 40; i += 1) win.fire('mousemove', move(50, 0));
+  const a = I.axes(state, 1 / 60);
+  assert.ok(a.roll <= 1, 'the stick exceeded full deflection: ' + a.roll);
+  assert.ok(a.roll > 0.8, 'a sustained drag did not reach the stop: ' + a.roll);
+});
+
+test('the spring rate does not depend on the frame rate', () => {
+  // The same wall-clock push must give the same turn at 30 fps and at 144 fps,
+  // or two players on the same machine but different settings fly different
+  // ships. Measured as the deflection remaining after a fixed 0.25 s.
+  const settled = (dt) => {
+    const { win, state } = capturedWindow();
+    win.fire('mousemove', move(80, 0));
+    let frames = Math.round(0.25 / dt);
+    for (let i = 0; i < frames; i += 1) I.axes(state, dt);
+    return state.mouseTarget.x;
+  };
+  const t30 = settled(1 / 30);
+  const t144 = settled(1 / 144);
+  assert.ok(Math.abs(t30 - t144) < 0.06,
+    'the spring is frame-rate dependent: ' + t30.toFixed(3) + ' vs ' + t144.toFixed(3));
 });
 
 test('the mouse cannot steer without pointer lock', () => {
-  // Otherwise moving the cursor to click a menu button yanks the ship.
-  const w = fakeWindow();
-  const s = I.createInput(w);
-  assert.equal(s.pointerLocked, false);
-  w.fire('mousemove', { clientX: 1590, clientY: 450 });
-  for (let i = 0; i < 120; i += 1) I.axes(s, 1 / 60);
-  assert.equal(I.axes(s, 1 / 60).roll, 0, 'the mouse steered without pointer lock');
+  // Otherwise moving the cursor to click something yanks the ship.
+  const win = fakeWindow();
+  const state = I.createInput(win, { pointerTarget: win });
+  assert.equal(state.pointerLocked, false);
+  for (let i = 0; i < 20; i += 1) win.fire('mousemove', move(60, 0));
+  assert.equal(I.axes(state, 1 / 60).roll, 0, 'the mouse steered without pointer lock');
 });
 
 test('keyboard and mouse combine without exceeding full deflection', () => {
-  const w = fakeWindow();
-  const s = I.createInput(w);
-  s.pointerLocked = true;
-  w.fire('keydown', key('ArrowRight'));
-  w.fire('mousemove', { clientX: 1600 - 4, clientY: 450 });
-  for (let i = 0; i < 240; i += 1) I.axes(s, 1 / 60);
-  const a = I.axes(s, 1 / 60);
+  const { win, state } = capturedWindow();
+  win.fire('keydown', key('ArrowRight'));
+  for (let i = 0; i < 20; i += 1) win.fire('mousemove', move(40, 0));
+  const a = I.axes(state, 1 / 60);
   assert.ok(a.roll <= 1, 'axes exceeded full deflection: ' + a.roll);
-  assert.ok(a.roll > 0.8, 'combined input lost authority: ' + a.roll);
+  assert.ok(a.roll > 0.8, 'the keyboard and mouse together lost authority: ' + a.roll);
 });
 
-test('mouse smoothing is frame-rate independent', () => {
-  // Reaching the same stick position must take the same wall-clock time at
-  // 30fps and at 144fps, or the ship handles differently on different machines.
-  const measure = (dt) => {
-    const w = fakeWindow();
-    const s = I.createInput(w);
-    s.pointerLocked = true;
-    w.fire('mousemove', { clientX: 1600 - 4, clientY: 450 });
-    let steps = 0;
-    while (steps < 1000) {
-      I.axes(s, dt);
-      steps += 1;
-      if (Math.abs(s.mouse.x) > 0.9) break;
-    }
-    return steps * dt; // seconds to reach 90% deflection
-  };
-  const t30 = measure(1 / 30);
-  const t144 = measure(1 / 144);
-  assert.ok(Math.abs(t30 - t144) < 0.05,
-    'smoothing depends on frame rate: ' + t30.toFixed(3) + 's vs ' + t144.toFixed(3) + 's');
-});
+test('releasing the pointer centres the virtual stick', () => {
+  const { win, doc, state } = capturedWindow();
+  for (let i = 0; i < 10; i += 1) win.fire('mousemove', move(40, 0));
+  assert.ok(Math.abs(I.axes(state, 1 / 60).roll) > 0, 'the stick never moved');
 
-test('releasing pointer lock centres the virtual stick', () => {
-  const w = fakeWindow();
-  const s = I.createInput(w);
-  s.pointerLocked = true;
-  w.fire('mousemove', { clientX: 1600 - 4, clientY: 450 });
-  for (let i = 0; i < 60; i += 1) I.axes(s, 1 / 60);
-  s.pointerLocked = false;
-  s.mouseTarget.x = 0;
-  s.mouseTarget.y = 0;
-  for (let i = 0; i < 240; i += 1) I.axes(s, 1 / 60);
-  assert.ok(Math.abs(I.axes(s, 1 / 60).roll) < 0.02, 'the stick did not recentre');
+  // Escape is the browser's own event, not the game's: it clears
+  // `pointerLockElement` and fires the change. That is what the game has to
+  // react to, because a player who presses Escape never tells the game.
+  withDocumentOn(doc, () => doc.exitPointerLock());
+  assert.equal(state.pointerLocked, false, 'the release was not noticed');
+  assert.equal(state.mouseTarget.x, 0, 'the stick kept its deflection after the release');
+  assert.equal(I.axes(state, 1 / 60).roll, 0, 'the ship kept turning after the pointer was let go');
 });
 
 test('invertPitch flips only the pitch axis', () => {
@@ -317,12 +437,16 @@ test('invertPitch flips only the pitch axis', () => {
 });
 
 test('the mouse can be disabled entirely', () => {
-  const w = fakeWindow();
-  const s = I.createInput(w, { mouse: false });
-  s.pointerLocked = true;
-  w.fire('mousemove', { clientX: 1590, clientY: 450 });
-  for (let i = 0; i < 120; i += 1) I.axes(s, 1 / 60);
-  assert.equal(I.axes(s, 1 / 60).roll, 0);
+  const win = fakeWindow();
+  const doc = fakeDocument(win);
+  const state = withDocumentOn(doc, () => {
+    const s = I.createInput(win, { mouse: false, pointerTarget: win });
+    doc.grant(win);
+    return s;
+  });
+  win.fire('mousemove', move(200, 0));
+  assert.equal(I.axes(state, 1 / 60).roll, 0);
+  assert.equal(I.requestMouse(state), false, 'a disabled mouse still tried to lock');
 });
 
 test('createInput tolerates a missing window', () => {
@@ -335,6 +459,93 @@ test('createInput tolerates a missing window', () => {
     assert.equal(I.consume(s, 'fire'), false);
     I.destroyInput(s);
   }
+});
+
+// --- Pointer lock: asking, refusing and escaping ---------------------------
+
+test('the lock is requested on the pointer target, not on the key target', () => {
+  // The defect this whole feature was blocked on: `createInput` was handed the
+  // window so key events would arrive whatever had focus, and the window has no
+  // `requestPointerLock` at all - so every request quietly returned false.
+  const win = fakeWindow();
+  const canvas = fakeWindow();
+  const doc = fakeDocument(win);
+  const state = withDocumentOn(doc, () => I.createInput(win, { pointerTarget: canvas }));
+
+  assert.equal(I.requestMouse(state), true, 'the request was not made');
+  assert.equal(canvas.lockRequests, 1, 'the canvas was not asked for the lock');
+  assert.equal(win.lockRequests || 0, 0, 'the window was asked for a lock it cannot give');
+});
+
+test('a second request while already captured is not sent', () => {
+  const { win, state } = capturedWindow();
+  const before = win.lockRequests;
+  assert.equal(I.requestMouse(state), false);
+  assert.equal(win.lockRequests, before, 'a redundant lock request was sent');
+});
+
+test('a refused lock is not requested again', () => {
+  // Chrome refuses when the request has no gesture behind it. Retrying every
+  // frame would be a `pointerlockerror` per frame and a console full of noise.
+  const win = fakeWindow();
+  const doc = fakeDocument(win);
+  const state = withDocumentOn(doc, () => I.createInput(win, { pointerTarget: win }));
+
+  assert.equal(I.requestMouse(state), true);
+  doc.fire('pointerlockerror');
+  assert.equal(state.lockFailed, true, 'the refusal was not recorded');
+  const after = win.lockRequests;
+  assert.equal(I.requestMouse(state), false, 'the game asked again after being refused');
+  assert.equal(win.lockRequests, after);
+});
+
+test('the host is told when the pointer is captured and released', () => {
+  // A host that keeps its own UI over the canvas has to know: while the pointer
+  // is captured its clicks go to the game.
+  const seen = [];
+  const win = fakeWindow();
+  const doc = fakeDocument(win);
+  const state = withDocumentOn(doc, () => {
+    const s = I.createInput(win, {
+      pointerTarget: win,
+      onPointerLock: (v) => seen.push(v),
+    });
+    I.addPointerLock(s, (v) => seen.push('observer:' + v));
+    doc.grant(win);
+    return s;
+  });
+  void state;
+
+  withDocumentOn(doc, () => doc.exitPointerLock());
+  assert.deepEqual(seen, [true, 'observer:true', false, 'observer:false']);
+});
+
+test('Escape cannot be re-captured on the next frame', () => {
+  // Escape is how a player gets their cursor back. If the game re-locks
+  // immediately the cursor never reappears and the key looks broken; Chrome
+  // also refuses a re-lock that soon, so the attempt is wasted anyway.
+  const { win, state } = capturedWindow();
+  I.releaseMouse(state);
+  assert.ok(state.relockIn > 0, 'the release set no cooldown');
+  assert.equal(I.requestMouse(state), false, 'the lock was taken straight back');
+
+  // Half a second in, still refused.
+  for (let i = 0; i < 30; i += 1) I.endFrame(state);
+  assert.ok(state.relockIn > 0);
+  assert.equal(I.requestMouse(state), false, 'the lock came back before the cooldown ended');
+
+  // Past the cooldown, allowed again.
+  for (let i = 0; i < 60; i += 1) I.endFrame(state);
+  assert.equal(state.relockIn, 0, 'the cooldown never expired');
+  assert.equal(I.requestMouse(state), true, 'the lock could not be taken back at all');
+  void win;
+});
+
+test('mouseActive answers whether the mouse is really flying the ship', () => {
+  const { doc, state } = capturedWindow();
+  assert.equal(I.mouseActive(state), true);
+  withDocumentOn(doc, () => doc.exitPointerLock());
+  assert.equal(I.mouseActive(state), false, 'a released pointer still counted as active');
 });
 
 // --- One key, one action ---------------------------------------------------

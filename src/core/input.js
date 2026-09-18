@@ -16,6 +16,14 @@
  * The mouse is a "virtual stick" rather than a direct-drag scheme because
  * Elite is a game about holding a turn, and a relative-drag mouse makes holding
  * a turn impossible without endless re-dragging.
+ *
+ * The stick rides on the *movement* of the cursor, not on its resting place:
+ * `movementX`/`movementY` are integrated and the accumulated deflection decays
+ * back to centre whenever the mouse is still. That is the model a joystick has -
+ * push to turn, let go and it springs back - and it is the only model that works
+ * under pointer lock. A resting-position stick is implied by the browser's
+ * cursor being locked at the centre, which makes `clientX`/`clientY` useless as
+ * a deflection signal.
  */
 
 /**
@@ -74,24 +82,67 @@ export const BINDINGS = {
   escapeCapsule: ['KeyK'],
 };
 
-/** Mouse sensitivity: how far from centre counts as full deflection. */
+/**
+ * The virtual stick: throw, spring and the pointer-lock timing.
+ */
 export const MOUSE = {
-  // Fraction of the smaller viewport dimension that means "full stick".
+  // Fraction of the stick throw that counts as centred rather than as a turn.
   deadzone: 0.06,
-  saturation: 0.42,
-  // How much the mouse axes are damped toward the target per second.
-  smoothing: 14,
+  /**
+   * How quickly the stick springs back to centre, in *deflections per second*.
+   *
+   * This is the "hold a turn" control: a mouse held steady bleeds its
+   * deflection off at 2.2 units/s, so a full-deflection turn relaxes to centre
+   * in about 0.45 s and a gentle 0.15 nudge is gone in 0.07 s - which is what
+   * makes a small correction a small correction rather than a permanent drift.
+   */
+  decay: 2.2,
+  /**
+   * Deflection per pixel, *before* decay is applied per frame.
+   *
+   * Chosen so that a steady drag arrives at full deflection just before the
+   * decay cancels it: at 60 fps, 230 px/s only just saturates. Drag faster than
+   * that and the stick pins to the stop; drag slower and it settles at a
+   * fraction of the throw, which is the fine control.
+   *
+   * This constant is coupled to `decay`. Changing one without the other moves
+   * the whole feel, so `input.test.js` measures the crossing rate where the two
+   * balance rather than trusting the numbers.
+   */
+  gain: 2.2 / 230,
+  /**
+   * Viewport height the sensitivity above was measured against. DPI and window
+   * size scale the pixel travel, so they must scale the gain with it.
+   */
+  referenceHeight: 900,
   // Multiplier applied to the mouse axes versus the keyboard's hard 1.0.
   // Slightly reduced so mouse flight is controllable at the edges.
   authority: 0.92,
+  /**
+   * How long after a manual release before the lock may be taken again, in
+   * seconds.
+   *
+   * Escape releases the pointer, and if the game re-locks on the very next
+   * frame the release looks broken - the cursor never even reappears. Chrome
+   * additionally refuses a re-lock requested within about a second of a
+   * user-initiated exit, so firing one off just produces a `pointerlockerror`
+   * and leaves the game insisting on a lock it cannot get. Waiting is not
+   * politeness; it is the only thing that works.
+   */
+  relockDelay: 1.4,
 };
 
 /**
  * A frame-by-frame input state.
  *
- * `keys` is a Set of codes currently held. `axes` is the smoothed, normalised
- * output. `pending` collects one-shot actions between frames (a laser shot
- * should fire once on press, not sixty times a second).
+ * `keys` is a Set of codes currently held. `mouse` is the integrated virtual
+ * stick, -1..1 per axis, and `pending` collects one-shot actions between frames
+ * (a laser shot should fire once on press, not sixty times a second).
+ *
+ * `el` is where key events are listened for and `pointerTarget` is what the
+ * pointer is locked to. They are usually different: keys must arrive even when
+ * the canvas is not focused, and only an element - never the window - can hold
+ * a pointer lock.
  */
 export function createInput(target, options) {
   const opts = options || {};
@@ -99,14 +150,39 @@ export function createInput(target, options) {
 
   const state = {
     keys: new Set(),
-    // Smoothed mouse deflection, -1..1 per axis.
+    // Integrated virtual stick, -1..1 per axis. Not a cursor offset: see the
+    // header. `mouseTarget` is what the stick is being pushed toward, and
+    // `mouse` is the relaxed value actually handed to `axes`.
     mouse: { x: 0, y: 0 },
-    // Raw, unsmoothed mouse deflection target.
     mouseTarget: { x: 0, y: 0 },
     pointerLocked: false,
+    // Element the pointer is (or should be) locked to.
+    pointerTarget: opts.pointerTarget || el,
+    // Seconds left before a lock may be requested again. See `relockDelay`.
+    relockIn: 0,
+    // Last frame's delta, so `endFrame` can advance the cooldown without the
+    // caller having to remember to pass it.
+    lastDt: 1 / 60,
+    /**
+     * Called with `true` when the pointer is captured and `false` when it is
+     * let go - by Escape, by the browser, or by `releaseMouse`.
+     *
+     * This is the one signal a host needs to get right: a UI that stays
+     * interactive while the pointer is locked is a UI whose clicks go to the
+     * game instead.
+     */
+    onPointerLock: opts.onPointerLock || null,
+    // Extra observers registered through `addPointerLock`. Kept separate from
+    // `onPointerLock` so the option and the function are not two spellings of
+    // the same thing that silently override each other.
+    pointerLockListeners: [],
     pending: [],
     // Set while the browser tab is hidden: everything releases.
     blurred: false,
+    // Set by `addPointerLock` when the browser refuses a lock. A refusal is
+    // normal (it is what happens on a trackpad-heavy machine where the user
+    // cancelled a prompt) and must not be retried in a loop.
+    lockFailed: false,
     el,
     mouseEnabled: opts.mouse !== false,
     invertPitch: !!opts.invertPitch,
@@ -147,31 +223,43 @@ export function createInput(target, options) {
 
   function onMouseMove(e) {
     if (!state.pointerLocked) return;
-    const w = el.innerWidth || 1;
-    const h = el.innerHeight || 1;
-    const cx = w * 0.5;
-    const cy = h * 0.5;
-    const dx = (e.clientX - cx) / cx;
-    const dy = (e.clientY - cy) / cy;
-    const r = Math.hypot(dx, dy);
-    if (r > 1) {
-      // Clamp onto the unit circle so diagonal input is not stronger.
-      state.mouseTarget.x = dx / r;
-      state.mouseTarget.y = dy / r;
-    } else {
-      state.mouseTarget.x = dx;
-      state.mouseTarget.y = dy;
-    }
+    // Under pointer lock the cursor sits at the screen centre and only the
+    // *delta* carries information, so a scheme that reads `clientX` measures
+    // nothing at all. See the header.
+    const gain = mouseGain(state);
+    const dx = typeof e.movementX === 'number' ? e.movementX : 0;
+    const dy = typeof e.movementY === 'number' ? e.movementY : 0;
+    state.mouseTarget.x = clamp(state.mouseTarget.x + dx * gain, -1, 1);
+    state.mouseTarget.y = clamp(state.mouseTarget.y + dy * gain, -1, 1);
   }
 
   function onPointerLockChange() {
-    state.pointerLocked = document.pointerLockElement === el
-      || document.pointerLockElement === el.documentElement
-      || document.pointerLockElement === el.body;
-    if (!state.pointerLocked) {
+    state.pointerLocked = !!state.pointerTarget && document.pointerLockElement === state.pointerTarget;
+    if (state.pointerLocked) {
+      // A fresh lock always starts centred, whatever the stick was doing when
+      // the last one ended.
+      state.mouse.x = 0;
+      state.mouse.y = 0;
+      state.mouseTarget.x = 0;
+      state.mouseTarget.y = 0;
+    } else {
+      // Losing the lock - Escape, alt-tab, or the browser deciding - must
+      // centre the stick. Otherwise the ship keeps the last deflection and
+      // flies into the station while the player is using the mouse to click
+      // something.
       state.mouseTarget.x = 0;
       state.mouseTarget.y = 0;
     }
+    notifyLock(state);
+  }
+
+  function onPointerLockError() {
+    // The browser refused. Record it so the session stops insisting on the
+    // lock and can say so on screen, rather than silently doing nothing every
+    // time the player clicks.
+    state.lockFailed = true;
+    state.pointerLocked = false;
+    notifyLock(state);
   }
 
   add(state, el, 'keydown', onKeyDown);
@@ -181,6 +269,7 @@ export function createInput(target, options) {
   add(state, el, 'mousemove', onMouseMove);
   if (typeof document !== 'undefined') {
     add(state, document, 'pointerlockchange', onPointerLockChange);
+    add(state, document, 'pointerlockerror', onPointerLockError);
   }
 
   return state;
@@ -201,6 +290,12 @@ function add(state, node, type, fn) {
 export function destroyInput(state) {
   for (const [node, type, fn] of state.listeners) node.removeEventListener(type, fn);
   state.listeners.length = 0;
+}
+
+/** Tell the host whether the pointer is captured. */
+function notifyLock(state) {
+  if (typeof state.onPointerLock === 'function') state.onPointerLock(state.pointerLocked);
+  for (const fn of state.pointerLockListeners) fn(state.pointerLocked);
 }
 
 /** Is any of these codes held? */
@@ -234,6 +329,7 @@ export function consume(state, action) {
  */
 export function axes(state, dt) {
   let pitch = 0, roll = 0, yaw = 0;
+  state.lastDt = dt;
 
   if (held(state, 'pitchDown')) pitch += 1;
   if (held(state, 'pitchUp')) pitch -= 1;
@@ -243,10 +339,10 @@ export function axes(state, dt) {
   if (held(state, 'yawLeft')) yaw -= 1;
 
   // Fold in the mouse virtual stick, then clamp so the two devices can be used
-  // together without exceeding full deflection. `stickFrom` already handles the
-  // deadzone and the saturation point in one step.
+  // together without exceeding full deflection. `stickFrom` handles the
+  // deadzone; the spring is handled by `stepMouse`.
   if (state.mouseEnabled) {
-    const m = smoothMouse(state, dt);
+    const m = stepMouse(state, dt);
     roll += stickFrom(m.x) * MOUSE.authority;
     pitch += stickFrom(m.y) * MOUSE.authority;
   }
@@ -268,27 +364,56 @@ export function axes(state, dt) {
 }
 
 /**
- * Map a -1..1 mouse deflection to a -1..1 stick position.
+ * Map a -1..1 stick deflection to thrust authority.
  *
- * Deadzone near the centre (so a stationary hand does not steer), then a linear
- * ramp from the deadzone edge up to `saturation`, where the stick is fully
- * over. A true exponential curve would be nicer for precision aiming, but the
- * linear ramp is guessable, and in a game where you must hold a turn for
- * seconds at a time, guessable beats optimal.
+ * A plain deadzone, then full authority immediately past it. The previous
+ * version ramped linearly from the deadzone edge to a *saturation* point, on
+ * the reasoning that a guessable curve beats an optimal one - but that only
+ * makes sense for a scheme where the stick has a physical travel to spend. With
+ * a spring-centred stick the curve is already in the player's hand: a small
+ * nudge is a small turn because it decays before it accumulates. A ramp on top
+ * of that just eats the first third of the throw.
  */
 function stickFrom(v) {
-  const a = Math.abs(v);
-  if (a <= MOUSE.deadzone) return 0;
-  const t = Math.min(1, (a - MOUSE.deadzone) / (MOUSE.saturation - MOUSE.deadzone));
-  return v < 0 ? -t : t;
+  return Math.abs(v) <= MOUSE.deadzone ? 0 : clamp(v, -1, 1);
 }
 
-/** Exponential smoothing of the mouse, frame-rate independent. */
-function smoothMouse(state, dt) {
-  const t = 1 - Math.exp(-MOUSE.smoothing * dt);
-  state.mouse.x += (state.mouseTarget.x - state.mouse.x) * t;
-  state.mouse.y += (state.mouseTarget.y - state.mouse.y) * t;
-  return state.mouse;
+/** How many units of deflection one pixel of mouse travel buys, this frame. */
+function mouseGain(state) {
+  const h = (typeof window !== 'undefined' && window.innerHeight)
+    || (state.pointerTarget && state.pointerTarget.clientHeight)
+    || MOUSE.referenceHeight;
+  return MOUSE.gain * (MOUSE.referenceHeight / Math.max(1, h));
+}
+
+/** Drop the stick back toward centre at the spring rate. */
+function releaseStick(state, dt) {
+  const rate = MOUSE.decay * dt;
+  if (state.mouseTarget.x > 0) state.mouseTarget.x = Math.max(0, state.mouseTarget.x - rate);
+  else if (state.mouseTarget.x < 0) state.mouseTarget.x = Math.min(0, state.mouseTarget.x + rate);
+  if (state.mouseTarget.y > 0) state.mouseTarget.y = Math.max(0, state.mouseTarget.y - rate);
+  else if (state.mouseTarget.y < 0) state.mouseTarget.y = Math.min(0, state.mouseTarget.y + rate);
+}
+
+/**
+ * Integrate the virtual stick for this frame and return it.
+ *
+ * A joystick is not a control that stays where you leave it, and a mouse has no
+ * *position* under pointer lock, so the two are reconciled by giving the mouse
+ * a stick that behaves like a joystick: the cursor's motion deflects it, and
+ * the deflection bleeds back to centre whenever the mouse is still. Holding a
+ * turn means keeping the mouse moving, which is exactly the gesture a player
+ * already makes with the keyboard held down.
+ *
+ * The decay runs in every case, including while no mouse has ever been seen.
+ * That keeps the function pure with respect to `dt`: calling it is what advances
+ * the stick, so nothing depends on whether a mousemove happened to arrive this
+ * frame. A stick that had been left at 0.5 would otherwise stay there forever
+ * if the mouse were unplugged.
+ */
+function stepMouse(state, dt) {
+  releaseStick(state, dt);
+  return state.mouseTarget;
 }
 
 function clamp(v, lo, hi) {
@@ -298,25 +423,89 @@ function clamp(v, lo, hi) {
 /** Clear the one-shot queue. Call at the end of each frame. */
 export function endFrame(state) {
   state.pending.length = 0;
+  // The re-lock cooldown rides the frame clock rather than a wall clock, so it
+  // works the same in the browser and under a test that steps time by hand.
+  tickMouse(state, state.lastDt || 1 / 60);
 }
 
-/** Request pointer lock. Must be called from a user gesture. */
+/**
+ * Request pointer lock. Must be called from a user gesture.
+ *
+ * Returns false when the lock was not asked for - no element to lock, a lock in
+ * progress, a cooldown still running after a manual release, or the browser
+ * having already refused once. The caller is expected to treat all of those as
+ * "the player is using the mouse, not the pointer".
+ */
 export function requestMouse(state) {
-  if (!state.el || !state.el.requestPointerLock) return false;
-  state.el.requestPointerLock();
+  if (!state.mouseEnabled) return false;
+  if (state.pointerLocked || state.lockFailed) return false;
+  if (state.relockIn > 0) return false;
+  const target = state.pointerTarget;
+  if (!target || typeof target.requestPointerLock !== 'function') return false;
+  // A request can be refused if the element is not in the document - which is
+  // exactly what happens when the caller kept a reference to a canvas that a
+  // screen rebuild has since replaced. Not fatal, but not silent either: the
+  // player gets no mouse, and the hint on screen has to say so.
+  if (target.isConnected === false) return false;
+  try {
+    // Chrome returns a promise here and rejects it when the request is not
+    // backed by a gesture; older browsers return nothing. Either way a failure
+    // must not surface as an unhandled rejection, so it is swallowed and the
+    // refusal is recorded instead.
+    const asked = target.requestPointerLock();
+    if (asked && typeof asked.catch === 'function') asked.catch(() => { state.lockFailed = true; });
+  } catch (err) {
+    state.lockFailed = true;
+    return false;
+  }
   return true;
 }
 
-/** Release pointer lock. */
+/**
+ * Release pointer lock, and refuse to take it again for `relockDelay`.
+ *
+ * The delay is the whole point. Escape is how a player gets their cursor back
+ * to click something else, and a lock that is re-acquired on the next frame
+ * makes Escape look broken.
+ */
 export function releaseMouse(state) {
   if (typeof document !== 'undefined' && document.exitPointerLock) {
-    document.exitPointerLock();
+    try { document.exitPointerLock(); } catch (err) { /* nothing to exit */ }
   }
   state.pointerLocked = false;
+  state.relockIn = MOUSE.relockDelay;
+  state.mouse.x = 0;
+  state.mouse.y = 0;
+  state.mouseTarget.x = 0;
+  state.mouseTarget.y = 0;
+}
+
+/**
+ * Watch pointer-lock changes, so a host that has to move out of the way can.
+ *
+ * Pointer lock belongs to one element at a time and stops propagating events to
+ * the window, so a station screen rendered over the canvas goes dead the moment
+ * the game takes the pointer. Being told when the lock is taken and released is
+ * what lets that screen decide whether it may accept a click.
+ */
+export function addPointerLock(state, onToggle) {
+  if (typeof onToggle !== 'function') return state;
+  state.pointerLockListeners.push(onToggle);
+  return state;
+}
+
+/** Advance the re-lock cooldown. Called once per frame by `endFrame`. */
+export function tickMouse(state, dt) {
+  if (state.relockIn > 0) state.relockIn = Math.max(0, state.relockIn - dt);
+}
+
+/** True while the pointer is captured and the mouse is actually flying. */
+export function mouseActive(state) {
+  return !!state.mouseEnabled && !!state.pointerLocked;
 }
 
 export default {
   BINDINGS, MOUSE,
   createInput, destroyInput, held, consume, axes, endFrame,
-  requestMouse, releaseMouse,
+  requestMouse, releaseMouse, addPointerLock, tickMouse, mouseActive,
 };

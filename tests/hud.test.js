@@ -766,6 +766,49 @@ test('the HUD never promises a key that does nothing', async () => {
   }
 });
 
+test('the mouse hints only promise what the game actually does', async () => {
+  // The mouse hint is deliberately *not* run through the scan above: "CLICK"
+  // and "ESC" are not letters, and a scanner that reads every capital as a key
+  // would report them as unbound. So the promise is checked by hand instead -
+  // and it has to be, because the hint is the only place a player is told the
+  // mouse exists at all. A hint that names a key nothing is bound to is the
+  // same defect the chart legend had with Enter.
+  const INPUT = await import('../src/core/input.js');
+  const codes = new Set();
+  for (const list of Object.values(INPUT.BINDINGS)) for (const c of list) codes.add(c);
+
+  for (const [name, text] of Object.entries(H.MOUSE_HINT)) {
+    assert.equal(typeof text, 'string', name + ' is not a string');
+    assert.ok(text.length > 0, name + ' is empty');
+    // No accidental key promises: the only capitalised words allowed are the
+    // ones this test knows about, and every one of them is a control the game
+    // really has - a click, the mouse, Escape, or the keyboard it is an
+    // alternative to.
+    const allowed = new Set([
+      'ESC', 'CLICK', 'KEYBOARD', 'MOUSE', 'STEERS', 'STEERING', 'POINTER',
+      'BY', 'TO', 'FLY', 'WITH', 'THE', 'CAPTURE', 'RELEASES', 'IT',
+      'BROWSER', 'REFUSED',
+    ]);
+    for (const w of text.match(/[A-Z]{2,}/g) || []) {
+      assert.ok(allowed.has(w), 'the ' + name + ' hint contains an unexpected promise: ' + w);
+    }
+  }
+
+  // The single key the hint names - Escape, to let go of the pointer - is in
+  // the one hint that says so. The others promise a *click*, which is not a key
+  // at all and is checked at the call sites in `main.js` instead.
+  assert.ok(codes.has('Escape'), 'nothing is bound to Escape');
+  for (const [name, text] of Object.entries(H.MOUSE_HINT)) {
+    const namesEsc = /\bESC\b/.test(text);
+    if (!namesEsc) continue;
+    assert.ok(codes.has('Escape'), 'the ' + name + ' hint promises ESC for nothing');
+  }
+  // And pointing at a click is only honest if a click is really what captures
+  // the pointer: the gesture that arms a lock must be one a click can supply.
+  assert.ok(H.MOUSE_HINT.capture.includes('CLICK'),
+    'the hint no longer says how to capture the pointer');
+});
+
 test('a count of one is not pluralised', () => {
   // The title screen said "1 systems visited" and the death screen "1 kills" -
   // the first two sentences a new commander ever reads. Both were a bare

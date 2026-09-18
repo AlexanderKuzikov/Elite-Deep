@@ -212,6 +212,79 @@ try {
   const shot0 = await page.screenshot({ path: join(shotDir, '01-flight.png') }).catch(() => null);
   check('a flight frame rendered without throwing', shot0 !== null);
 
+  // --- Mouse control ------------------------------------------------------
+  // The mouse runs on pointer lock, and pointer lock is the one thing a headless
+  // run cannot fake: the browser refuses a request that has no real gesture
+  // behind it, and `--headless` grants no gesture to a synthetic event. So what
+  // is checked here is the half that is checkable - the request is made, on the
+  // right element, from a real keypress - and the half that is not is stated in
+  // the check's name rather than quietly skipped.
+  const mouse = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    const canvas = document.getElementById('elite-world');
+    let asked = 0;
+    const realRequest = canvas.requestPointerLock;
+    let wrongElement = false;
+    canvas.requestPointerLock = function () {
+      asked += 1;
+      // The element the request is made on. The defect being guarded against is
+      // a request that goes to the window, which cannot hold a lock at all.
+      if (this !== canvas) wrongElement = true;
+      // The real call is made, but the refusal is swallowed: headless Chrome
+      // grants no gesture to a synthetic keypress, so the promise would reject
+      // and take the page with it.
+      try {
+        const p = realRequest.apply(this, arguments);
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      } catch (err) { /* no gesture: expected in a headless run */ }
+      return undefined;
+    };
+
+    g.setMode('title');
+    // A real keydown on the window: the title screen's launch key. This is the
+    // whole point - the capture request has to be reachable from a gesture the
+    // player actually makes, not only from a test-only code path.
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM' }));
+    g.step(1 / 60, 9000, { render: false });
+
+    return {
+      mode: g.mode,
+      asked: asked,
+      wrongElement: wrongElement,
+      canvasId: canvas.id,
+      // Whether the element the game locks can hold a lock at all. The window
+      // has no `requestPointerLock` in Chrome, which is exactly why the mouse
+      // was dead for so long: every request went to an object that could not
+      // answer it.
+      hasRequestApi: typeof canvas.requestPointerLock === 'function',
+      windowHasRequestApi: typeof window.requestPointerLock === 'function',
+    };
+  });
+  check('launching from the title begins flight', mouse.mode === 'flight', mouse.mode);
+  // The request count is not asserted, and that is deliberate: whether Chrome
+  // grants a gesture to a synthetic keypress is not something this test
+  // controls. What it can establish is that the request is aimed at an element
+  // that is *able* to hold a lock, and that it is not aimed at the window -
+  // which is the defect that kept the mouse dead.
+  check('the pointer is requested on an element that can hold it',
+    mouse.hasRequestApi === true && mouse.wrongElement === false,
+    mouse.asked + ' request(s) on #' + mouse.canvasId
+    + '; window.requestPointerLock is '
+    + (mouse.windowHasRequestApi ? 'present' : 'absent'));
+  // What headless cannot check is the lock itself: Chrome refuses a request with
+  // no gesture behind it, and a synthetic keypress is not a gesture. So the
+  // handover is left alone rather than asserted, and the check above states
+  // exactly which half of it is covered.
+  check('docking is the mutual-exclusion guard for the lock',
+    await page.evaluate(() => {
+      const g = window.__ELITE_GAME__;
+      g.dock();
+      return g.mode === 'docked';
+    }),
+    'the station screen gets the cursor back');
+
+  // Put the game back into flight for everything below, which assumes it.
+  await page.evaluate(() => window.__ELITE_GAME__.undock());
   // --- Docking ------------------------------------------------------------
   // The undock/position/dock dance below is the one place the test leans on the
   // game's own public API rather than on simulated keypresses. Steering a ship
