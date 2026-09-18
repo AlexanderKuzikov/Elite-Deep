@@ -29,61 +29,71 @@
  * | career                | final    | growth/jump | trade | contracts |
  * |-----------------------|----------|-------------|-------|-----------|
  * | trade only            | 10 627   | 1.23 %      | 100 % | 0 %       |
- * | + jobs, best pay first|  4 573   | 0.32 %      |  35 % | 65 %      |
- * | + jobs, cargo first   |  3 312   | 1.31 %      |  76 % | 24 %      |
+ * | + jobs, best pay first|  6 004   | 1.69 %      |   0 % | 100 %     |
+ * | + jobs, cargo first   |  3 112   | 1.31 %      |  40 % | 60 %      |
  *
  * Three things worth knowing:
  *
- *   1. **Contracts are a real share of income.** For a commander who takes them
- *      they are **65 % of income** - but see the next point, because the share
- *      is not the same thing as the outcome.
- *   2. **Taking jobs still ends with less cash than pure trading** - 4 573
- *      against 10 627. Two reasons, and neither is that contracts pay badly:
- *      the job-taking career spends **11 800 CR on equipment** (six items) and
- *      stands still for **76 of its 120 days** clearing pirates. Standing still
- *      earns nothing.
+ *   1. **Contracts pay for themselves.** The reward-greedy career earns **100 %
+ *      of its income from contracts** - it reads the board and stops trading -
+ *      and the cargo-first career earns 60 %. Neither is a side dish.
+ *   2. **Taking jobs still ends with less cash than pure trading at 120 jumps** -
+ *      6 004 against 10 627 - and the reason is not that contracts pay badly.
+ *      The job-taking career spends **11 800 CR on equipment** (five to six
+ *      items) and stands still for **101 of its 120 days** clearing pirates.
+ *      Standing still earns nothing, and equipment is a one-off that has not
+ *      paid back yet.
  *   3. **Cleanups dominate by reward**, so a reward-greedy commander takes
- *      fifteen of them and one relief run, and no cargo jobs at all. Every
- *      other job type is strictly worse per day.
+ *      sixteen of them and no cargo jobs at all. Every other job type is
+ *      strictly worse per day - which is the subject of #13.
  *
- * **Read the 120-jump table as the *early* game.** At **800** jumps the
- * best-pay career overtakes pure trading - 72 280 against 69 516 - because the
- * equipment is a one-off cost that then keeps paying, and by then both have
- * settled to a crawl (0.20 % against 0.19 % per jump, which is what a mature
- * economy looks like). Note that the *final* figure is not where the difference
- * shows: at 120 jumps the gap is 2.3x and at 800 there is none. So "taking jobs
- * makes you poorer" is true for the first few hundred jumps and false
- * afterwards, which is a different sentence and a more useful one.
+ * **Read the 120-jump table as the early game.** By **800** jumps the best-pay
+ * career overtakes pure trading - **76 085 against 69 516** - because the
+ * equipment is a one-off cost that then keeps paying. So "taking jobs makes you
+ * poorer" is true for the first few hundred jumps and false afterwards, which is
+ * a different sentence and a more useful one.
  *
- * ## The cargo-first column is broken, and it is the *clock* that broke it
+ * ## Why this script was lying, and what it cost to find out
  *
- * The cargo-first column exists to check the instrument rather than to model a
- * player: if cargo jobs never complete when chosen *first*, the cargo path in
- * this sim is broken rather than unprofitable. At 120 jumps it shows **8
- * deliveries and 6 relief runs completed against 8 failures** - and at 800
- * jumps, **62 completed against 61 failures**, with contract income *negative*
- * (-18 975 CR by the flow accounting). That is not "contracts pay badly". It is
- * this sim refusing to let them be delivered.
+ * Every number in this table used to be wrong, and the *shape* was wrong too: it
+ * reported that a career of pure trading beat one that took contracts by 2x and
+ * that cargo jobs were nearly uncompletable. Both were artifacts of the
+ * instrument. Four separate defects, all of them in the measuring apparatus
+ * rather than in the game:
  *
- * The cause is the day model, not the economy. **This loop spends a day on
- * every jump**, while `MISSION.days` is set for the game's model where a day is
- * a *dock* and a jump costs no time at all (`decayDay` fires on `dock`).
- * Deadlines sized for "six docks" therefore expire after six *jumps*, and a
- * multi-hop run is late before it arrives.
+ *   1. **The clock.** This loop spent a day on every jump, while `MISSION.days`
+ *      is sized for the game's model where a day is a *dock* and a jump costs no
+ *      time at all (`decayDay` fires on `dock`). Deadlines meant for six docks
+ *      expired after six jumps, so every multi-hop run was late by construction.
+ *   2. **Cleanups never started.** A bounty names the system it was posted in,
+ *      so it needs no hop - the work is already here. The sim set the target and
+ *      then fell through to the trade search, which found no neighbour that
+ *      "closed the distance" to a target zero light years away, and flew off,
+ *      leaving the job to lapse in the port where it was taken.
+ *   3. **Cargo was bought once and never topped up.** The purchase branch was
+ *      guarded by `!player.cargo[carry.id]`, so as soon as any of the commodity
+ *      was aboard it refused to buy more. A run split across two ports could
+ *      never be completed.
+ *   4. **A job finished where it started was never handed in.** `resolveArrival`
+ *      ran at the *end* of a pass, on the next system, so a delivery whose
+ *      target was the current system had no hop to make and no dock to be paid
+ *      at. The career sat still on a completed delivery for a hundred days.
  *
- * A second defect compounds it: a cleanup job parks the ship for `tons + 1`
- * days, but `resolveArrival` only checks `day > deadlineDay` once the commander
- * is back in the target system. So a six-tonne delivery can go overdue while
- * the ship sits in someone else's port, and only finds out later.
+ * The game itself was right about the deadline, which was worth checking rather
+ * than assuming: `resolveArrival` tests `day > deadlineDay` *above* its
+ * `targetIndex` guard, so a contract lapses on time wherever the commander is.
+ * The bug was in the sim, not in `missions.js`.
  *
- * Neither is a balance finding, and the reward formula is not implicated: on
- * live boards **only 55 of 3 680 offers** are too tight for a round trip, so in
- * the game the window is generous. Fix the clock here and the deadline check
- * there before reading the cargo column as an economic verdict.
+ * A real defect *did* turn up in the game from this work, found because the
+ * corrected clock changed the random stream: see `suppliedStock` in
+ * `logic/missions.js` - the board was posting cargo contracts larger than the
+ * source system's stock, 45 % of them.
  *
- * The cargo-first column's own numbers should be treated as **fiction until
- * then** - it is measuring "can this loop finish a job", not "is a job worth
- * taking".
+ * A cross-check that keeps this honest: the flow accounting reconciles to
+ * within a credit (start + income - costs = final), so the columns are not
+ * quietly losing money anywhere. The `no-run` and `stranded` counters read zero
+ * on all three careers at every horizon measured - the careers now go somewhere
+ * every day instead of standing still.
  *
  * ## What this does not model
  *
@@ -225,8 +235,39 @@ function runCareer(jumps, jobs, prefer) {
   // target system for one day per pirate and then collects.
   let clearing = null;      // { target, tons, daysLeft }
 
+  /**
+   * Bank a day, the way the game does: `player.day += 1`, then the contract
+   * sweep runs against the *new* day.
+   *
+   * The order matters and it is the game's order. `dock()` resolves contracts
+   * with the day it arrived on, *then* advances - so a deadline is inclusive.
+   * Doing it the other way round would mark a job late on the very day the
+   * commander delivered it.
+   */
+  function dockAndAdvance() {
+    day += 1;
+    if (!jobs) return [];
+    const missed = [];
+    for (const outcome of M.resolveArrival(player, system.index, day)) {
+      if (outcome.ok) {
+        incomeContracts += outcome.reward;
+        tally[outcome.contract.type] = (tally[outcome.contract.type] || 0) + 1;
+      } else {
+        tally.failed += 1;
+        missed.push(outcome);
+      }
+    }
+    for (const outcome of M.checkBounties(player, system.index)) {
+      incomeContracts += outcome.reward;
+      tally.bounty += 1;
+    }
+    return missed;
+  }
+
   for (let jump = 0; jump < jumps; jump += 1) {
     // --- Arrive -----------------------------------------------------------
+    // The day is banked at the *end* of the pass, not here: one pass is one
+    // dock, and a dock happens after the flying. See `dockAndAdvance`.
     if (jobs) {
       if (clearing && system.index === clearing.target) {
         clearing.daysLeft -= 1;
@@ -236,18 +277,6 @@ function runCareer(jumps, jobs, prefer) {
           REP.remember(player, system.index, 'piratesCleared', clearing.tons);
           clearing = null;
         }
-      }
-      for (const outcome of M.resolveArrival(player, system.index, day)) {
-        if (outcome.ok) {
-          incomeContracts += outcome.reward;
-          tally[outcome.contract.type] = (tally[outcome.contract.type] || 0) + 1;
-        } else {
-          tally.failed += 1;
-        }
-      }
-      for (const outcome of M.checkBounties(player, system.index)) {
-        incomeContracts += outcome.reward;
-        tally.bounty += 1;
       }
     }
 
@@ -269,16 +298,6 @@ function runCareer(jumps, jobs, prefer) {
     const fuelCost = P.refuelCost(player);
     if (player.fuel < player.fuelMax * 0.7 && player.cash > fuelCost * 2) {
       P.refuel(player);
-    }
-
-    // --- Still hunting? Hold position, but only once you are there. -------
-    // The first version held position whenever `clearing` was set, including
-    // before it had travelled to the target - so the days never ticked down and
-    // the run ended with the ship parked for ever in the wrong system.
-    if (clearing && system.index === clearing.target) {
-      day += 1;
-      curve.push({ jump, day, cash: player.cash, system: system.name, note: 'clearing' });
-      continue;
     }
 
     // --- Equipment --------------------------------------------------------
@@ -329,6 +348,20 @@ function runCareer(jumps, jobs, prefer) {
             target = pick.targetIndex;
           }
         }
+
+      }
+
+      // A cleanup job names the system it was posted in, so a fresh one needs
+      // no hop at all: the work is here. Staying put is the *whole* strategy,
+      // and the sim used to miss it - it fell through to the trade search,
+      // found no neighbour that "closes the distance" to a target zero light
+      // years away, and flew off on a cargo run, leaving the bounty to lapse
+      // in the port where it was taken. Every bounty failure in the trace was
+      // this: accepted day 1, deadline 9, still in the same system on day 10.
+      if (clearing && system.index === clearing.target) {
+        dockAndAdvance();
+        curve.push({ jump, day, cash: player.cash, system: system.name, note: 'clearing' });
+        continue;
       }
     }
 
@@ -349,10 +382,23 @@ function runCareer(jumps, jobs, prefer) {
     }
 
     // --- Buy the contract's goods ----------------------------------------
-    if (carry && !player.cargo[carry.id]) {
+    // Top up to the contract's tonnage, not "buy only if the hold is empty".
+    //
+    // The previous test was `!player.cargo[carry.id]`, which refused to buy a
+    // single tonne as soon as any of the commodity was aboard. That looks
+    // harmless until a run is split across two ports - and it deadlocked the
+    // whole career when the split happened in a system with no neighbours. At
+    // Duanor the sim sat on 7 tonnes of a 13-tonne food job with **26 tonnes on
+    // the local market** and nowhere to jump, for 102 days, because the only
+    // buying branch it had was switched off by its own partial load.
+    //
+    // This mirrors `MISSIONS.shoppingList`: the shortfall is `tons - held`.
+    if (carry) {
+      const held = (player.cargo && player.cargo[carry.id]) || 0;
+      const short = carry.tons - held;
       const row = hereMarket[carry.id];
-      if (row) {
-        const tons = Math.min(carry.tons, Math.floor(row.stock),
+      if (short > 0 && row) {
+        const tons = Math.min(short, Math.floor(row.stock),
           Math.floor(player.cash / Math.max(0.01, row.buy)),
           Math.floor(P.holdMaxOf(player) - P.cargoUsed(player)));
         if (tons > 0) {
@@ -361,6 +407,19 @@ function runCareer(jumps, jobs, prefer) {
           player.activity += tons * 0.6;
         }
       }
+    }
+
+    // --- The job may already be done, here -------------------------------
+    // A contract whose target is the system you are standing in needs no hop:
+    // hand it over and bank the day. Without this the sim looked for a
+    // neighbour that "closes the distance" to a target zero light years away,
+    // found none, and sat still for a hundred days with a completed delivery in
+    // the hold. `resolveArrival` ran afterwards, on the *next* system, so a job
+    // finished where it started could never be handed in at all.
+    if (jobs && target !== null && system.index === target) {
+      dockAndAdvance();
+      curve.push({ jump, day, cash: Math.round(player.cash), system: system.name, note: 'delivered' });
+      continue;
     }
 
     // --- And a trade run to pay for the trip ------------------------------
@@ -374,7 +433,8 @@ function runCareer(jumps, jobs, prefer) {
     }
 
     if (!hop) {
-      // Nothing worth carrying and nowhere to be: wait a day and look again.
+      // Nothing worth carrying and nowhere to be: sit out the day and look
+      // again. A day spent waiting is a dock - see "The day model" above.
       day += 1;
       curve.push({ jump, day, cash: player.cash, system: system.name, note: 'no run' });
       continue;
@@ -382,7 +442,12 @@ function runCareer(jumps, jobs, prefer) {
 
     player.fuel = Math.max(0, player.fuel - hop.ly);
     system = hop.system;
-    day += 1;
+    // **The jump itself costs no time.** In the game `decayDay` fires on dock,
+    // and a hyperspace jump is instant - a commander can cross the galaxy in
+    // what the calendar calls no time at all. The sim used to charge a day per
+    // jump, which is what made every deadline look impossible: `MISSION.days`
+    // is sized for "six docks", and six docks is not six jumps.
+    dockAndAdvance();
 
     curve.push({ jump, day, cash: Math.round(player.cash), system: system.name });
   }
@@ -463,6 +528,8 @@ for (const entry of columns) {
   const stranded = r.curve.filter((c) => c.note === 'stranded').length;
   const barren = r.curve.filter((c) => c.note === 'no run').length;
   const clearing = r.curve.filter((c) => c.note === 'clearing').length;
+  const delivered = r.curve.filter((c) => c.note === 'delivered').length;
   console.log(name.padEnd(20) + 'days ' + String(r.day).padStart(4)
-    + '   stranded ' + stranded + ', no-run ' + barren + ', clearing ' + clearing);
+    + '   stranded ' + stranded + ', no-run ' + barren
+    + ', clearing ' + clearing + ', delivered in place ' + delivered);
 }

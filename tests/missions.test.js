@@ -1028,3 +1028,45 @@ test('no cargo contract asks for more than the ship can hold', () => {
     oversized.length + ' of ' + cargo + ' cargo offers do not fit: '
     + oversized.slice(0, 5).join('; '));
 });
+
+test('a cargo contract asks for no more than the posting system can supply', () => {
+  // The third barrier of the same kind as the hold clamp above. A delivery is
+  // bought on the open market at the system that posts it, so a board asking
+  // for more than that system's stock is asking for something that does not
+  // exist: the commander buys what there is, arrives short, and can never
+  // close the contract.
+  //
+  // Measured before the fix: **1387 of 3080 cargo offers (45 %)** named a
+  // tonnage above the local stock, and 120 named a commodity the system does
+  // not sell at all. The worst gap was 18 tonnes. The tonnage band
+  // (`tons.delivery = [6, 22]`) knew about the hold but nothing about
+  // `qBase`, so it promised goods the market never had.
+  const unfillable = [];
+  let cargo = 0;
+
+  for (const s of galaxy.systems) {
+    for (const day of [0, 7, 23, 61]) {
+      const board = M.generateBoard(s, galaxy, P.create(), 4711, day);
+      const stock = {};
+      for (const row of E.computeMarket(s, day, 0)) {
+        if (row.available) stock[row.com.id] = row.qty;
+      }
+      for (const offer of board) {
+        if (offer.type !== 'delivery' && offer.type !== 'relief') continue;
+        cargo += 1;
+        const qty = stock[offer.commodity];
+        if (qty === undefined) {
+          unfillable.push(offer.commodity + ' is not sold at ' + s.name);
+        } else if (offer.tons > qty) {
+          unfillable.push(offer.tons + ' t of ' + offer.commodity
+            + ' from ' + s.name + ' which holds ' + qty + ' t');
+        }
+      }
+    }
+  }
+
+  assert.ok(cargo > 0, 'no cargo offers generated to check');
+  assert.equal(unfillable.length, 0,
+    unfillable.length + ' of ' + cargo + ' cargo offers cannot be filled: '
+    + unfillable.slice(0, 5).join('; '));
+});

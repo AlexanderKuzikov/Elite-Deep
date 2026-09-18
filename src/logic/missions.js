@@ -71,6 +71,15 @@ export const MISSION = {
   maxHops: 6,
   /** Days allowed, by type. A day passes on every dock and every jump. */
   days: { delivery: [7, 12], relief: [6, 10], courier: [4, 8], bounty: [6, 12] },
+  /**
+   * Docks a single hop is worth when a deadline has to be raised to fit.
+   *
+   * One, because a dock is what advances the clock and a leg of the journey
+   * costs one. The `+ 1` at the call site is the dock at the far end, where the
+   * documents are actually handed over - a courier that arrives with no day
+   * left to dock has not delivered.
+   */
+  daysPerHop: 1,
   /** Tonnage on offer, by type, as a floor and a share of the hold. */
   tons: { delivery: [6, 22], relief: [10, 30] },
   /** Bounty sizes. */
@@ -177,17 +186,35 @@ export function generateBoard(system, galaxy, player, seed, day) {
 
     used.add(pick.system.index);
     const [minTons, maxTons] = relief ? MISSION.tons.relief : MISSION.tons.delivery;
-    // The band's ceiling is clamped to the hold the commander actually has.
+    // The band's ceiling is clamped to two things: the hold the commander has,
+    // and the stock the posting system can actually supply.
     //
-    // Measured before the clamp: **11 of 145 cargo offers demanded more than 20
-    // tonnes** while the base hold carries 20, and the board said nothing - the
-    // commander only found out after buying the cargo. A job that does not fit
-    // the ship is not a job. The extended hold (35 t) still buys something real:
-    // it is what lets a board offer its largest runs, rather than being the only
-    // way to attempt the ones already posted.
+    // The hold clamp closed a measured defect - **11 of 145 cargo offers
+    // demanded more than 20 tonnes** while the base hold carries 20, and the
+    // board said nothing, so the commander found out after buying. A job that
+    // does not fit the ship is not a job.
+    //
+    // The stock clamp closes the same defect one step earlier, and it is the
+    // bigger of the two. A delivery is *bought* at the system that posts it, so
+    // a board asking for more than that system holds is asking for goods that
+    // do not exist. Measured before this: **1387 of 3080 cargo offers (45 %)**
+    // named a tonnage above the local stock and 120 named a commodity the
+    // system does not sell at all, the worst gap being 18 tonnes. The tonnage
+    // band knew about `qBase` in no way whatsoever. The commander's loop was to
+    // buy what there was, arrive short, and never be able to close.
+    //
+    // The band's floor is *not* raised to meet the stock: a poor system may
+    // legitimately post a small job. Instead the whole band is shifted down
+    // when the stock cannot carry its ceiling, so a thin market posts small
+    // runs rather than impossible ones.
     const hold = (player && P.holdMaxOf(player)) || P.BASE_HOLD;
-    const top = Math.max(minTons, Math.min(maxTons, hold));
-    const tons = Math.round(minTons + rand() * (top - minTons));
+    const stock = suppliedStock(system, comId, day, player);
+    const ceiling = Math.max(0, Math.min(maxTons, hold, stock));
+    if (ceiling < 1) continue;      // this system cannot supply the job at all
+    // Keep the floor below the ceiling, and let a scarce market pull it down.
+    const floor = Math.min(minTons, ceiling);
+    const top = Math.max(floor, ceiling);
+    const tons = Math.max(1, Math.round(floor + rand() * (top - floor)));
     const days = pickDays(rand, relief ? 'relief' : 'delivery');
 
     offers.push(makeOffer({
@@ -211,13 +238,24 @@ export function generateBoard(system, galaxy, player, seed, day) {
       // The furthest one, because a courier is paid for distance.
       const pick = free[free.length - 1];
       used.add(pick.system.index);
+      // The deadline is raised to fit the route, never lowered.
+      //
+      // A courier is the one job that picks its target for *maximising*
+      // distance, and the days band was drawn independently of how far that
+      // turned out to be - so a six-hop run could be posted with five days and
+      // be lost before it was accepted. Found at Rari: a courier to Ores, six
+      // hops, five days. Raising the floor around the drawn value keeps the
+      // randomness and keeps the job flyable; the alternative - redrawing until
+      // it fits - would bias every courier on the board toward short runs.
+      const drawn = pickDays(rand, 'courier');
+      const days = Math.max(drawn, Math.ceil(pick.hops * MISSION.daysPerHop) + 1);
       offers.push(makeOffer({
         type: 'courier',
         system: system,
         target: pick.system,
         commodity: null,
         tons: 0,
-        days: pickDays(rand, 'courier'),
+        days: days,
         day: day,
         distance: pick.dist,
         hops: pick.hops,
@@ -265,6 +303,27 @@ function distanceLy(galaxy, a, b) {
   const dx = a.x - b.x;
   const dy = a.y - b.y;
   return Math.sqrt(dx * dx + dy * dy) * lyPerUnit(galaxy);
+}
+
+/**
+ * How many tonnes of one commodity a system can actually sell right now.
+ *
+ * Returns 0 for a commodity the world does not trade at all. This reads the
+ * *real* market rather than an approximation of it, because the whole point is
+ * that the board and the market screen must agree: a board that clamps by one
+ * rule and a market that stocks by another puts the commander back where this
+ * defect started.
+ *
+ * `player` is only needed for the activity term, which is what makes prices and
+ * stock drift with the commander's own trading. A missing player reads the
+ * market at rest, which is the right answer for a board generated for nobody.
+ */
+function suppliedStock(system, comId, day, player) {
+  const activity = (player && player.activity) || 0;
+  for (const row of E.computeMarket(system, day, activity)) {
+    if (row.com && row.com.id === comId) return row.available ? row.qty : 0;
+  }
+  return 0;
 }
 
 /** Does this system want the commodity? Either it consumes it or it is short. */
