@@ -238,6 +238,14 @@ function goodSave(over) {
   p.equip = { scoop: true };
   p.standing = { EMPIRE: -12 };
   p.contracts = [{ deadlineDay: 40, type: 'delivery', targetIndex: 3 }];
+  // The real shape of a lived-in career: a memory object per system, with
+  // `lastVisitDay` legitimately null before the first docked visit. A
+  // fixture without one is exactly how the validator once rejected every
+  // save the game writes while the whole suite stayed green.
+  p.systemMemory = {
+    7: { visits: 2, lastVisitDay: null, piratesCleared: 1 },
+    3: { visits: 1, lastVisitDay: 12, patrolsKilled: 0 },
+  };
   const raw = JSON.parse(P.serialize(p));
   return Object.assign(raw, over || {});
 }
@@ -365,6 +373,13 @@ test('a contract with no usable deadline is rejected', () => {
   const v = P.validateSave(goodSave({ contracts: [{ type: 'delivery' }] }), VOCAB);
   assert.equal(v.ok, false, 'a contract with no deadline was accepted');
   assert.match(v.reason, /deadline/);
+});
+
+test('a memory with a non-numeric event is rejected', () => {
+  const bad = goodSave();
+  bad.systemMemory = { 7: { visits: 2, lastVisitDay: 'yesterday' } };
+  const v = P.validateSave(bad, VOCAB);
+  assert.equal(v.ok, false, 'a string in the world memory was accepted');
 });
 
 test('garbage that is not a save at all is rejected, not thrown on', () => {

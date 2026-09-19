@@ -917,14 +917,18 @@ try {
     // Damage through the state the game reads, then step so the loop notices.
     g.player.hull = 0;
     // The game only checks death when damage is applied, so drive it through
-    // the same path a collision would: put the ship inside the station.
+    // the same path a collision would: put the ship at the station's heart.
+    // The centre overlaps every collision sphere, is never inside the docking
+    // corridor (the slot face is a radius away), and the nose is turned away
+    // from the slot so the docking verdict stays red and the auto-dock cannot
+    // steal the impact. (An offset to the side looks equivalent but is not:
+    // the sphere is 0.62 of the model radius, and outside it nothing happens.)
     const st = g.session.scene.station;
     const f = g.session.flight;
-    // Offset to the *side* of the station, off the slot axis, so this is a
-    // genuine hull impact rather than an (auto-docked) approach.
-    f.pos.x = st.position.x + 120;
+    f.pos.x = st.position.x;
     f.pos.y = st.position.y;
     f.pos.z = st.position.z;
+    f.quat.x = 0; f.quat.y = 1; f.quat.z = 0; f.quat.w = 0;
     f.vel.x = 0; f.vel.y = 0; f.vel.z = 0;
     g.session.grace = 0;
     g.session.impactCooldown = 0;
@@ -992,9 +996,13 @@ try {
   if (ready) {
     respawnBefore = await page.evaluate(
       () => window.__ELITE_GAME__.renderer.scene.children.length);
-    // Ram the station until dead: shields down, a sliver of hull, parked
-    // inside the hull with no grace and no impact cooldown. Re-parked every
-    // second in case a bounce carried the wreck clear.
+    // Ram the station until dead: shields down, a sliver of hull, parked at
+    // the station's heart with no grace and no impact cooldown. The centre
+    // overlaps every collision sphere, is never in the docking corridor, and
+    // the nose is turned away from the slot so the verdict stays red and the
+    // auto-dock cannot steal the impact. Re-parked every second in case a
+    // bounce carried the wreck clear (an offset to the side is not enough:
+    // the sphere is 0.62 of the model radius, and outside it nothing happens).
     for (let i = 0; i < 20; i++) {
       reachedDead = await page.evaluate(() => {
         const g = window.__ELITE_GAME__;
@@ -1004,7 +1012,10 @@ try {
         g.player.hull = 1;
         const st = g.session.scene.station;
         const f = g.session.flight;
-        f.pos.x = st.position.x + 120; f.pos.y = st.position.y; f.pos.z = st.position.z;
+        f.pos.x = st.position.x;
+        f.pos.y = st.position.y;
+        f.pos.z = st.position.z;
+        f.quat.x = 0; f.quat.y = 1; f.quat.z = 0; f.quat.w = 0;
         f.vel.x = 0; f.vel.y = 0; f.vel.z = 0;
         g.session.grace = 0;
         g.session.impactCooldown = 0;

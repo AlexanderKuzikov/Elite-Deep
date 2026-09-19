@@ -639,9 +639,15 @@ function validateSave(d, options) {
   // feed prices and danger. Checked lightly - plain objects, finite numeric
   // values, known keys where a vocabulary exists - because a deep audit of
   // every memory event is not worth the code.
-  var maps = ['wanted', 'visited', 'systemMemory', 'costBasis'];
-  for (var m = 0; m < maps.length; m += 1) {
-    var mk = maps[m];
+  //
+  // Two shapes, not one: `wanted`, `visited` and `costBasis` are flat maps of
+  // numbers, while `systemMemory` maps a system to a whole memory object -
+  // counters plus `lastVisitDay`, which is legitimately `null` before the
+  // first docked visit. Treating the memories as numbers rejected every real
+  // save the game writes, because every career has visited a system.
+  var flatMaps = ['wanted', 'visited', 'costBasis'];
+  for (var m = 0; m < flatMaps.length; m += 1) {
+    var mk = flatMaps[m];
     if (d[mk] === undefined || d[mk] === null) continue;
     if (typeof d[mk] !== 'object' || Array.isArray(d[mk])) {
       reasons.push(mk + ' is not an object');
@@ -652,6 +658,29 @@ function validateSave(d, options) {
       var mv = d[mk][mkeys[q]];
       if (typeof mv !== 'number' || !isFinite(mv)) {
         reasons.push(mk + ' of ' + mkeys[q] + ' is not a finite number');
+      }
+    }
+  }
+  if (d.systemMemory !== undefined && d.systemMemory !== null) {
+    if (typeof d.systemMemory !== 'object' || Array.isArray(d.systemMemory)) {
+      reasons.push('systemMemory is not an object');
+    } else {
+      var skeys = Object.keys(d.systemMemory);
+      for (var s = 0; s < skeys.length; s += 1) {
+        var mem = d.systemMemory[skeys[s]];
+        if (!mem || typeof mem !== 'object' || Array.isArray(mem)) {
+          reasons.push('memory of system ' + skeys[s] + ' is not an object');
+          continue;
+        }
+        var fkeys = Object.keys(mem);
+        for (var u = 0; u < fkeys.length; u += 1) {
+          var fv = mem[fkeys[u]];
+          // `null` is a real value here (`lastVisitDay` before the first
+          // docked visit), not a missing one.
+          if (fv !== null && (typeof fv !== 'number' || !isFinite(fv))) {
+            reasons.push('memory of system ' + skeys[s] + ' has a non-numeric ' + fkeys[u]);
+          }
+        }
       }
     }
   }
