@@ -739,12 +739,21 @@ function deserializeChecked(json, options) {
   try {
     d = typeof json === 'string' ? JSON.parse(json) : json;
   } catch (err) {
+    deserializeChecked.reason = 'unparseable JSON';
     return null;
   }
   var verdict = validateSave(d, options);
-  if (!verdict.ok) return null;
+  if (!verdict.ok) {
+    // Kept on the function (rather than thrown) so a driver can report *why*
+    // a save was refused: a bare null tells the log nothing, and the last
+    // three CI failures were diagnosed by guessing instead of reading.
+    deserializeChecked.reason = verdict.reason;
+    return null;
+  }
+  deserializeChecked.reason = null;
   return deserialize(d);
 }
+deserializeChecked.reason = null;
 
 export {
   RANKS,

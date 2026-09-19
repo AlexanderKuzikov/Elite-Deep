@@ -841,12 +841,16 @@ try {
     g.player.cash = 1;
     g.player.dockedAt = null;
     const read = g.load();
+    // The boot log carries the rejection reason when a load refuses: without
+    // it a red check says only "cash 1" and the cause is guessed, not read.
+    const saveLog = (window.__ELITE_BOOT_LOG__ || [])
+      .filter((line) => String(line).indexOf('save:') >= 0).slice(-3).join(' | ');
     return { wrote: wrote, read: read, cash: g.player.cash,
-      dockedAt: g.player.dockedAt };
+      dockedAt: g.player.dockedAt, log: saveLog };
   });
   check('the game saves', save.wrote === true);
   check('the game loads what it saved', save.read === true && save.cash === 4242,
-    'cash ' + save.cash);
+    'cash ' + save.cash + ' :: ' + save.log);
   check('a save remembers the last station docked at', save.dockedAt === 7,
     'dockedAt came back as ' + JSON.stringify(save.dockedAt));
 
@@ -894,6 +898,8 @@ try {
     const restored = g.load();
     results.goodStillLoads = restored !== false && restored !== null;
     results.goodCash = g.player.cash;
+    results.log = (window.__ELITE_BOOT_LOG__ || [])
+      .filter((line) => String(line).indexOf('save:') >= 0).slice(-3).join(' | ');
     return results;
   });
   const brokenNames = ['stringCash', 'badSystem', 'infiniteFuel', 'unknownCargo', 'unknownFaction'];
@@ -907,7 +913,7 @@ try {
     brokenNames.map((n) => n + ':' + broken[n].cashFinite + '/' + broken[n].systemValid).join(' '));
   check('a good save still loads after a broken one was refused',
     broken.goodStillLoads === true && broken.goodCash === 4242,
-    'restored=' + broken.goodStillLoads + ' cash=' + broken.goodCash);
+    'restored=' + broken.goodStillLoads + ' cash=' + broken.goodCash + ' :: ' + broken.log);
 
   // --- Death and recovery -------------------------------------------------
   const death = await page.evaluate(() => {
@@ -917,15 +923,18 @@ try {
     // Damage through the state the game reads, then step so the loop notices.
     g.player.hull = 0;
     // The game only checks death when damage is applied, so drive it through
-    // the same path a collision would: put the ship at the station's heart.
-    // The centre overlaps every collision sphere, is never inside the docking
-    // corridor (the slot face is a radius away), and the nose is turned away
-    // from the slot so the docking verdict stays red and the auto-dock cannot
-    // steal the impact. (An offset to the side looks equivalent but is not:
-    // the sphere is 0.62 of the model radius, and outside it nothing happens.)
+    // the same path a collision would: park inside the collision sphere but
+    // off the slot axis. The sphere is 0.62 of the model radius, the corridor
+    // and the docking verdict both key off the slot axis, so three quarters
+    // of the sphere on +x is overlap without corridor and without a green
+    // verdict - however the nose points (it is turned away from the slot
+    // anyway, as a second bar). Computed live, not hardcoded: the old +120
+    // stood outside the sphere, where nothing happens, and the check passed
+    // on pirate damage instead of the impact it claimed.
     const st = g.session.scene.station;
     const f = g.session.flight;
-    f.pos.x = st.position.x;
+    const off = ((st.userData.radius || 150) * 0.62) * 0.75;
+    f.pos.x = st.position.x + off;
     f.pos.y = st.position.y;
     f.pos.z = st.position.z;
     f.quat.x = 0; f.quat.y = 1; f.quat.z = 0; f.quat.w = 0;
@@ -996,13 +1005,11 @@ try {
   if (ready) {
     respawnBefore = await page.evaluate(
       () => window.__ELITE_GAME__.renderer.scene.children.length);
-    // Ram the station until dead: shields down, a sliver of hull, parked at
-    // the station's heart with no grace and no impact cooldown. The centre
-    // overlaps every collision sphere, is never in the docking corridor, and
-    // the nose is turned away from the slot so the verdict stays red and the
-    // auto-dock cannot steal the impact. Re-parked every second in case a
-    // bounce carried the wreck clear (an offset to the side is not enough:
-    // the sphere is 0.62 of the model radius, and outside it nothing happens).
+    // Ram the station until dead: shields down, a sliver of hull, parked
+    // inside the collision sphere but off the slot axis (same geometry as
+    // the death check above: overlap without corridor, verdict red whatever
+    // the nose says), with no grace and no impact cooldown. Re-parked every
+    // second in case a bounce carried the wreck clear.
     for (let i = 0; i < 20; i++) {
       reachedDead = await page.evaluate(() => {
         const g = window.__ELITE_GAME__;
@@ -1012,7 +1019,8 @@ try {
         g.player.hull = 1;
         const st = g.session.scene.station;
         const f = g.session.flight;
-        f.pos.x = st.position.x;
+        const off = ((st.userData.radius || 150) * 0.62) * 0.75;
+        f.pos.x = st.position.x + off;
         f.pos.y = st.position.y;
         f.pos.z = st.position.z;
         f.quat.x = 0; f.quat.y = 1; f.quat.z = 0; f.quat.w = 0;

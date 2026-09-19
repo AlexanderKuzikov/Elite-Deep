@@ -1107,7 +1107,9 @@ export function boot(host, options) {
       // already takes.
       const p = PLAYER.deserializeChecked(data.player, saveVocabulary());
       if (!p) {
-        log('save: rejected as not playable, starting fresh');
+        log('save: rejected as not playable ('
+          + (PLAYER.deserializeChecked.reason || 'no reason recorded')
+          + '), starting fresh');
         return null;
       }
       log('save: loaded commander ' + p.name);
