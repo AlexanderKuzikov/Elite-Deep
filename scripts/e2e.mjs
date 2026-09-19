@@ -107,9 +107,12 @@ async function waitFor(predicate, timeoutMs, stepMs = 100) {
  * a key that is still marked held from an earlier synthetic press (no keyup
  * was ever sent) is ignored - and a check that relaunches from death with a
  * bare keydown waits for a resurrection that never comes.
+ *
+ * Takes the page explicitly: this helper lives at module scope, while `page`
+ * belongs to the run block below.
  */
-async function pressKey(code) {
-  await page.evaluate((c) => {
+async function pressKey(pg, code) {
+  await pg.evaluate((c) => {
     window.dispatchEvent(new KeyboardEvent('keyup', { code: c }));
     window.dispatchEvent(new KeyboardEvent('keydown', { code: c }));
   }, code);
@@ -312,7 +315,7 @@ try {
   // A real press on the window: the title screen's launch key. This is the
   // whole point - the capture request has to be reachable from a gesture the
   // player actually makes, not only from a test-only code path.
-  await pressKey('KeyM');
+  await pressKey(page, 'KeyM');
   // Let the real frame loop notice and act, which is how a player launches:
   // poll the probe until the launch asked, rather than assuming N frames ran.
   const launchAsked = await waitFor(
@@ -1001,7 +1004,7 @@ try {
   // while a freed one rebuilds to nearly the same count (same seed).
   async function launchIfDead() {
     // A full press, not a bare keydown: see `pressKey`.
-    await pressKey('KeyM');
+    await pressKey(page, 'KeyM');
     return waitFor(
       () => page.evaluate(() => window.__ELITE_GAME__.mode === 'flight'),
       15000);
