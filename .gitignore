@@ -23,3 +23,7 @@ desktop.ini
 !.vscode/extensions.json
 *.swp
 *~
+
+# Agent scratch: isolated worktree copies made by side tools. Not project
+# content, never committed, must not show up as untracked noise.
+.kilo/
