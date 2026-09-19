@@ -341,6 +341,17 @@ test('a save carrying a prototype key is rejected', () => {
   assert.match(v.reason, /prototype/);
 });
 
+test('a decayed offence record is valid', () => {
+  // The record decays half a point per day, so `_offences` is routinely
+  // fractional. Requiring it whole rejected every save older than a day
+  // with a record - found because the browser refused a career the suite
+  // accepted.
+  assert.equal(P.validateSave(goodSave({ offences: 2.5 }), VOCAB).ok, true,
+    'a decayed record was rejected');
+  assert.equal(P.validateSave(goodSave({ offences: -1 }), VOCAB).ok, false,
+    'a negative record was accepted');
+});
+
 test('negative counts and dead maxima are rejected', () => {
   assert.equal(P.validateSave(goodSave({ fuel: -1 }), VOCAB).ok, false,
     'negative fuel was accepted');

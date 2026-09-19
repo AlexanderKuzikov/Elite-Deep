@@ -101,6 +101,20 @@ async function waitFor(predicate, timeoutMs, stepMs = 100) {
   }
 }
 
+/**
+ * A full physical press: release first, then press. The game queues a
+ * one-shot only on the edge from "not held" to "held", so a bare keydown for
+ * a key that is still marked held from an earlier synthetic press (no keyup
+ * was ever sent) is ignored - and a check that relaunches from death with a
+ * bare keydown waits for a resurrection that never comes.
+ */
+async function pressKey(code) {
+  await page.evaluate((c) => {
+    window.dispatchEvent(new KeyboardEvent('keyup', { code: c }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: c }));
+  }, code);
+}
+
 const browser = await puppeteer.launch({
   executablePath: chromePath,
   headless: 'new',
@@ -295,12 +309,10 @@ try {
   const cooldownExpired = await waitFor(
     () => page.evaluate(() => window.__ELITE_GAME__.debugPointer().relockIn <= 0),
     30000);
-  await page.evaluate(() => {
-    // A real keydown on the window: the title screen's launch key. This is the
-    // whole point - the capture request has to be reachable from a gesture the
-    // player actually makes, not only from a test-only code path.
-    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM' }));
-  });
+  // A real press on the window: the title screen's launch key. This is the
+  // whole point - the capture request has to be reachable from a gesture the
+  // player actually makes, not only from a test-only code path.
+  await pressKey('KeyM');
   // Let the real frame loop notice and act, which is how a player launches:
   // poll the probe until the launch asked, rather than assuming N frames ran.
   const launchAsked = await waitFor(
@@ -954,7 +966,12 @@ try {
   // traffic list the collision scan walked, so the rock branch never fired.
   // Park the ship just off a rock's skin at ramming speed and check the hull.
   // The hit pierces, so full shields change nothing; a dozen stepped frames
-  // at 100 units a second always cross the skin from six units out.
+  // at 100 units a second always cross the skin from six units out. This runs
+  // stepped frames, which do not process input - so if the death check above
+  // left the ship dead, relaunch first: dead frames neither fly nor collide.
+  if (await page.evaluate(() => window.__ELITE_GAME__.mode) === 'dead') {
+    check('rock check relaunches from death', await launchIfDead(), 'stuck dead');
+  }
   const rockRam = await page.evaluate(() => {
     const g = window.__ELITE_GAME__;
     const rock = g.session.scene.rocks[0];
@@ -983,9 +1000,8 @@ try {
   // leaked system costs a root plus lights plus a fleet (~14 children),
   // while a freed one rebuilds to nearly the same count (same seed).
   async function launchIfDead() {
-    await page.evaluate(() => {
-      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM' }));
-    });
+    // A full press, not a bare keydown: see `pressKey`.
+    await pressKey('KeyM');
     return waitFor(
       () => page.evaluate(() => window.__ELITE_GAME__.mode === 'flight'),
       15000);

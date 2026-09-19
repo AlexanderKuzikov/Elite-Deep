@@ -536,7 +536,11 @@ function validateSave(d, options) {
       reasons.push(pk + ' is not positive');
     }
   }
-  var whole = ['day', 'missiles', 'kills', 'offences'];
+  // `day`, `missiles` and `kills` move in whole steps. `_offences` does not:
+  // the record decays half a point per day, so a fractional value is a
+  // career a few days old, not a corrupt one - rejecting it refused every
+  // save written after the commander's first week with a record.
+  var whole = ['day', 'missiles', 'kills'];
   for (var w = 0; w < whole.length; w += 1) {
     var wk = whole[w];
     if (typeof d[wk] === 'number' && isFinite(d[wk]) && d[wk] % 1 !== 0) {
