@@ -356,17 +356,25 @@ function isCrisis(system) {
  *
  * Two things key on this: the board marks an offer `taken` by matching ids, and
  * `accept` refuses an id it already holds. So it has to be unique per *job* -
- * and until the commodity was added it was not. Type, route, deadline and
- * tonnage were the whole story, so two different cargoes posted on the same
- * route for the same tonnage and landing on the same day shared an id, and the
- * duplicate guard refused the second as though it were the first.
+ * and it has taken three passes to get there.
+ *
+ * The first version was type, route, deadline and tonnage. Two different cargoes
+ * posted on the same route for the same tonnage and landing on the same day
+ * shared an id, and the duplicate guard refused the second as though it were the
+ * first. The commodity fixed that.
+ *
+ * The deadline was still carried as the *sum* `day + days`, which is ambiguous
+ * in the other direction: a job posted on day 0 with 10 days to run and one
+ * posted on day 5 with 5 days to run both end on day 10 and collided. The sum is
+ * what a screen shows, but the pair is what identifies the job, so both terms
+ * are now in the id.
  *
  * Courier and bounty carry no commodity (`null`), which leaves an empty final
  * slot rather than changing their ids.
  */
 export function offerId(spec) {
   return spec.type + ':' + spec.system.index + ':' + spec.target.index + ':'
-    + (spec.day + spec.days) + ':' + spec.tons + ':' + (spec.commodity || '');
+    + spec.day + ':' + spec.days + ':' + spec.tons + ':' + (spec.commodity || '');
 }
 
 /**

@@ -879,6 +879,13 @@ function drawSystemCard(ctx, info, right, top) {
     'Danger: ' + dangerLabel(info.danger),
     info.distance !== undefined ? 'Distance: ' + info.distance.toFixed(1) + ' ly' : null,
     info.fuelNeeded !== undefined ? 'Fuel: ' + info.fuelNeeded.toFixed(1) + ' ly' : null,
+    // In range but off the route graph. Without this line the card advertised a
+    // fuel cost for a jump that `canJump` refuses, which is how the commander
+    // found out: press H, get "No route to that system", and no way to tell
+    // which of the 64 dots are actually reachable. The lanes are drawn on this
+    // very chart; this is the same fact in words.
+    info.noRoute ? 'NO ROUTE FROM HERE' : null,
+    info.overRange ? 'OUT OF RANGE' : null,
   ].filter(Boolean);
 
   ctx.font = HUD_LAYOUT.font + 'px ' + MONO;

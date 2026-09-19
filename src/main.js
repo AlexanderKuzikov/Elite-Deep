@@ -772,18 +772,23 @@ export function boot(host, options) {
     if (!session.chartLinks) session.chartLinks = buildChartLinks();
     const links = session.chartLinks;
     const neighbourSet = new Set();
-    // `neighbors` measures in the generator's own world units; `jumpRange()`
-    // is in light years. The conversion is the same one `toLy` applies in the
-    // other direction, and leaving it out silently shrank the query radius by
-    // a factor of five - the chart then highlighted one reachable system where
-    // there were six, and the route graph's own links masked the difference.
-    for (const n of GALAXY.neighbors(galaxy, session.system, session.jumpRange() / LY_PER_UNIT)) {
-      neighbourSet.add(n.system.index);
-    }
+    // Neighbours are the systems a *lane* leads to within the tank - the same
+    // rule `canJump` enforces, so a system highlighted here can actually be
+    // jumped to and a system left unhighlighted cannot.
+    //
+    // This used to be the union of two sources: `GALAXY.neighbors` within the
+    // jump range, plus the route links. The range half was wrong for exactly the
+    // reason it was wrong in `canJump` - near in space is not linked in the
+    // graph - and it marked systems as reachable that no lane reaches. On the
+    // 14 ly tank that highlighted off-graph systems the commander could not fly
+    // to. One source now, and it is the graph.
+    const range = session.jumpRange();
     for (const l of links) {
-      if (l.a === session.index || l.b === session.index) {
-        neighbourSet.add(l.a === session.index ? l.b : l.a);
-      }
+      if (l.a !== session.index && l.b !== session.index) continue;
+      // A lane longer than the tank is drawn on the chart but cannot be jumped,
+      // so it is not a neighbour. `routeBetween` treats it the same way.
+      if (l.distance > range) continue;
+      neighbourSet.add(l.a === session.index ? l.b : l.a);
     }
 
     const systems = galaxy.systems.map((s) => ({
@@ -800,13 +805,18 @@ export function boot(host, options) {
     const selected = galaxy.systems[session.chartCursor];
     const dist = (selected && selected.index !== session.index)
       ? toLy(GALAXY.distance(session.system, selected)) : undefined;
+    // The card answers the only question the commander has at the chart: can I
+    // jump there. Distinguishing "too far" from "no lane" matters because the
+    // answers differ - one is fixed by refuelling, the other never.
+    const laneExists = !!(selected && selected.index !== session.index
+      && GALAXY.routeBetween(galaxy, session.index, selected.index, player.fuelMax) !== null);
 
     return {
       // Both these are in light years, matching the route distances. The
       // chart draws every marker at `x * scale` where scale divides by
       // discRadius, so mixing units here would silently shrink the whole map.
       discRadius: toLy(GALAXY.DISC_RADIUS),
-      jumpRange: session.jumpRange(),
+      jumpRange: range,
       routes: links,
       systems: systems,
       selected: session.chartCursor,
@@ -822,6 +832,8 @@ export function boot(host, options) {
         danger: selected.danger,
         distance: dist,
         fuelNeeded: dist === undefined ? undefined : dist,
+        overRange: dist !== undefined && dist > range,
+        noRoute: dist !== undefined && !laneExists,
       } : null,
     };
   }
@@ -1137,14 +1149,32 @@ export function boot(host, options) {
   // Hyperspace
   // -------------------------------------------------------------------------
 
-  /** Can we jump to this system right now? Returns a reason when we cannot. */
+  /**
+   * Can we jump to this system right now? Returns a reason when we cannot.
+   *
+   * Two rules, and the order matters. **Fuel first**, because "out of fuel" is
+   * the message the commander can act on - telling them a system is not on a
+   * lane when they could not have reached it anyway is noise. Then the route
+   * graph: only `galaxy.routes` edges may be jumped.
+   *
+   * The graph rule was missing, and a range check alone is not the same thing.
+   * A lane is capped at `JUMP_REFERENCE * 1.6` and dead ends get a second exit,
+   * but nothing links *every* near pair - so systems 11 ly apart with no lane
+   * between them are ordinary. On the 14 ly tank that made **27 % of all legal
+   * jumps into off-graph teleports** (1294 of 4732 over 12 seeds): the chart
+   * showed no lane, the contracts board refused to route through it via
+   * `hopsBetween`, and the jump still worked.
+   */
   function canJump(targetIndex) {
     if (targetIndex === session.index) return { ok: false, reason: 'here' };
     const target = galaxy.systems[targetIndex];
     if (!target) return { ok: false, reason: 'unknown' };
     const d = toLy(GALAXY.distance(session.system, target));
     if (d > player.fuel) return { ok: false, reason: 'fuel', distance: d };
-    return { ok: true, distance: d };
+    // The one-hop form of `hopsBetween`: same edges, same per-hop tank limit.
+    const lane = GALAXY.routeBetween(galaxy, session.index, targetIndex, player.fuelMax);
+    if (lane === null) return { ok: false, reason: 'no-lane', distance: d };
+    return { ok: true, distance: d, lane: lane };
   }
 
   function beginJump(targetIndex) {
@@ -1153,6 +1183,10 @@ export function boot(host, options) {
       play('deny');
       if (check.reason === 'fuel') {
         say('Out of fuel: need ' + check.distance.toFixed(1) + ' ly', HUD.HUD_COLOURS.danger);
+      } else if (check.reason === 'no-lane') {
+        // Reachable on paper, but no lane leads there. The chart draws the
+        // routes, so this is the commander pointing at a gap between two lanes.
+        say('No route to that system', HUD.HUD_COLOURS.warn);
       }
       return false;
     }
@@ -1296,7 +1330,13 @@ export function boot(host, options) {
     // Missiles are shootable, and they are the *nearer* target more often
     // than not - a missile on its way in is between the ship and the ship that
     // fired it. One raycast over both lists, so the nearer thing wins.
-    const targets = session.traffic.ships.concat(session.incoming);
+    //
+    // Belt rocks go in the same list. They carry `hp`, `radius` and `cargo` in
+    // their `userData` and `raycast` already accepts a bare mesh (`t.mesh || t`),
+    // so the whole rock path was built and simply never handed a target: the
+    // belt was scenery you could ram but not shoot, and the ore in it was
+    // unreachable. `SHIP_HP.asteroid` was dead too - nothing decremented it.
+    const targets = session.traffic.ships.concat(session.incoming, rocksOf(session));
     const hit = WORLD.raycast(origin, dir, targets, 900);
     if (hit && hit.target && !hit.target.dead) {
       if (session.incoming.indexOf(hit.target) >= 0) {
@@ -1307,11 +1347,79 @@ export function boot(host, options) {
         spawnExplosion(hit.target.mesh.position);
         say('Missile destroyed', HUD.HUD_COLOURS.ok);
         dropIncoming(session.incoming.indexOf(hit.target));
+      } else if (isRock(hit.target)) {
+        onRockHit(hit.target, shot.damage, hit.point);
       } else {
         onPlayerHit(hit.target, shot.damage, hit.point);
       }
     }
     return true;
+  }
+
+  /** The current system's belt rocks, or an empty list when there is no scene. */
+  function rocksOf(sess) {
+    return (sess.scene && sess.scene.rocks) || [];
+  }
+
+  /** Is this raycast target a belt rock rather than a ship or a missile? */
+  function isRock(target) {
+    return !!(target && target.userData && target.userData.kind === 'asteroid');
+  }
+
+  /**
+   * A laser hit on a belt rock.
+   *
+   * Deliberately *not* routed through `onPlayerHit`: a rock has no faction, no
+   * standing, pays no bounty and is not a crime (`offenceFor('asteroid')` is
+   * zero, and `standingShiftFor` is empty for it). What it does have is ore,
+   * which is the point - `pickRockCargo` decides what a rock gives up from the
+   * system profile, and until this path existed nothing could ever collect it.
+   *
+   * The rock is removed from the scene on destruction rather than hidden, so the
+   * ram pass in `checkCollisions` stops seeing a rock that is no longer there.
+   */
+  function onRockHit(rock, damage, point) {
+    rock.userData.hp -= damage;
+    const died = rock.userData.hp <= 0;
+    play(died ? 'explode' : 'hitShield');
+    spawnImpact(point, died ? 0xffb066 : 0xbfae94);
+    if (!died) return;
+
+    const cargo = rock.userData.cargo || 'minerals';
+    // `dropCargo` already returns a *list* (one or two canisters), which is what
+    // `addWreckage` takes - the same call the ship path makes. Wrapping it in
+    // another array, as this first did, hands `addWreckage` a single element
+    // that has no `.mesh`, so it is skipped in silence and the rock breaks for
+    // nothing.
+    //
+    // The wreckage also has to survive `prune`: a canister is exempt from the
+    // distance despawn, because `despawnDistance` (2600) is inside the belt
+    // (2200-3400) and ore dropped in the outer belt used to be culled on the
+    // next frame.
+    if (session.traffic) {
+      session.traffic.addWreckage(
+        WORLD.dropCargo(renderer.scene, rock.position, cargo, session.time | 0));
+    }
+    spawnExplosion(rock.position);
+    say('Rock broken up: ore released', HUD.HUD_COLOURS.ok);
+    removeRock(rock);
+  }
+
+  /**
+   * Take a destroyed rock out of the belt.
+   *
+   * `scene.rocks` is the array the ram pass and the laser both read, and the
+   * mesh has to leave `belt` too or it stays visible in the sky as a ghost that
+   * neither hurts nor can be shot again. Disposal is the same `disposeTree` the
+   * wreck path uses: the rock owns a geometry and a material per mesh, and a belt
+   * of ninety of them is worth reclaiming when one is broken.
+   */
+  function removeRock(rock) {
+    const list = rocksOf(session);
+    const i = list.indexOf(rock);
+    if (i >= 0) list.splice(i, 1);
+    if (rock.parent) rock.parent.remove(rock);
+    disposeTree(rock);
   }
 
   /** Resolve a player laser hit on an NPC. */
@@ -1447,9 +1555,25 @@ export function boot(host, options) {
     say('Missile away', HUD.HUD_COLOURS.warn);
   }
 
-  /** Aim the next missile at whatever is in front of the reticle. */
+  /**
+   * Aim the next missile at whatever is in front of the reticle.
+   *
+   * Wreckage is excluded. A canister or a capsule is *scooped* - you fly into it
+   * - and it is the one object in the sky you must not shoot: a missile costs a
+   * credit and a hardpoint, and the whole point of the canister is that it is
+   * the reward for the kill, not another target. It was in this list because the
+   * filter was `!s.dead` and nothing else, so `T` cycled onto drifting ore and
+   * the lock box drew a firing solution on it. The lead indicator made it worse:
+   * it computes an intercept from `t.velocity`, and a canister's drift is not a
+   * flight path.
+   *
+   * `hostile` is *not* the right filter - a trader is a legitimate target and a
+   * peaceful one, and the player is allowed to start that fight.
+   */
   function cycleTarget(dir) {
-    const ships = session.traffic ? session.traffic.ships.filter((s) => !s.dead) : [];
+    const ships = session.traffic
+      ? session.traffic.ships.filter((s) => !s.dead && s.kind !== 'canister' && s.kind !== 'capsule')
+      : [];
     if (!ships.length) { session.target = null; return say('No contacts'); }
     // Sort by distance so "next" is a predictable sweep outward.
     ships.sort((a, b) => WORLD.dist(a.mesh.position, session.flight.pos)
@@ -1959,6 +2083,14 @@ export function boot(host, options) {
     // come with you.
     clearIncoming();
 
+    // And the ones you fired. A warhead still homing on a ship you left behind
+    // is a mesh in a scene nobody is flying any more: the station screen is up,
+    // so the player cannot see it, cannot recall it, and cannot launch again -
+    // but the step loop kept advancing it, so a kill could land while the
+    // commander was in the market buying food. `enterSystem` has always cleared
+    // both lists together; docking cleared only half of its own.
+    clearMissiles();
+
     decayDay(false);
     saveGame();
     // Repair of the day's drift happens on dock, so prices on the screen the
@@ -2007,7 +2139,14 @@ export function boot(host, options) {
     else say('Fly into the slot, not away from it', HUD.HUD_COLOURS.warn);
   }
 
-  /** Hyperspace toward the chart cursor, without opening the chart first. */
+  /**
+   * Hyperspace toward the chart cursor, without opening the chart first.
+   *
+   * `canJump` is the whole filter, so this only has to rank what it allows: the
+   * score is how well the target lines up with the nose, minus how much of the
+   * tank the hop costs. The scan covers all 64 systems, which is cheap and
+   * correct - a lane is an edge, and an edge is exactly what `canJump` checks.
+   */
   function quickJump() {
     // Pick the nearest reachable system in the direction the nose points, so
     // "H" is useful without the chart.

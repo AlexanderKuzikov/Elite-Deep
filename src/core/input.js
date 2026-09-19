@@ -77,8 +77,6 @@ export const BINDINGS = {
    */
   leave: ['Escape'],
   mute: ['KeyB'],
-  save: ['F5'],
-  load: ['F9'],
   escapeCapsule: ['KeyK'],
 };
 
@@ -330,9 +328,17 @@ export function createInput(target, options) {
   return state;
 }
 
-/** Keys the browser would otherwise use for scrolling or shortcuts. */
+/**
+ * Keys the browser would otherwise use for scrolling or shortcuts.
+ *
+ * F5 and F9 were here for the `save`/`load` bindings above. Both are gone: the
+ * game saves itself on dock and never asks (see `saveGame`), and a binding that
+ * swallows the keypress without acting on it is worse than no binding at all -
+ * the player pressed F5 to reload a stuck page and the page did not reload
+ * either. Releasing the keys restores the browser's own meaning.
+ */
 const SCROLL_KEYS = new Set([
-  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'F5', 'F9',
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space',
 ]);
 
 /** Register a listener and remember it, so destroy() can undo everything. */
@@ -504,7 +510,9 @@ export function endFrame(state, dt) {
  *
  * Returns false when the lock was not asked for - no element to lock, a lock in
  * progress, a cooldown still running after a manual release, or the browser
- * having already refused once. The caller is expected to treat all of those as
+ * having refused enough times in a row to give up (`MOUSE.giveUpAfter`, which is
+ * deliberately more than one: a single refusal is a click that arrived a frame
+ * too early, not a verdict). The caller is expected to treat all of those as
  * "the player is using the mouse, not the pointer".
  */
 export function requestMouse(state) {

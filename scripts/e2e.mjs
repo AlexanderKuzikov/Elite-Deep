@@ -757,6 +757,39 @@ try {
   check('the chart has a selected-system card', chart.hasInfo, chart.infoName);
   check('every chart system is named', chart.namesPresent);
 
+  // --- The chart agrees with the jump rule ---------------------------------
+  // `canJump` used to compare straight-line distance against the tank and
+  // nothing else, so on the 14 ly tank it allowed jumps to systems no route
+  // edge connects - the chart drew no lane, the contracts board refused to
+  // route through one, and the jump still worked. The chart marks neighbours by
+  // walking the same route graph now, so this asserts the two cannot drift
+  // apart again: every system the chart highlights must be one `canJump`
+  // accepts, and a system the chart highlights must NOT be one it refuses.
+  const agree = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    // Fit the long-range tank so off-graph pairs are actually in range; on the
+    // base 7 ly tank the two rules coincide and this would prove nothing.
+    g.player.fuelMax = 14;
+    g.player.fuel = 14;
+    const c = g.chartState();
+    const mismatches = [];
+    let highlighted = 0;
+    for (const s of c.systems) {
+      if (s.index === c.player.index) continue;
+      const allowed = g.canJump(s.index).ok;
+      const marked = !!s.neighbour;
+      if (allowed !== marked) {
+        mismatches.push(s.name + (allowed ? ' jumpable but unmarked' : ' marked but refused'));
+      }
+      if (marked) highlighted += 1;
+    }
+    return { mismatches: mismatches, highlighted: highlighted };
+  });
+  check('the chart highlights at least one neighbour', agree.highlighted > 0,
+    agree.highlighted + ' neighbours');
+  check('the chart highlight and canJump agree exactly', agree.mismatches.length === 0,
+    agree.mismatches.slice(0, 3).join('; ') || 'no mismatches');
+
   const shot3 = await page.screenshot({ path: join(shotDir, '04-chart.png') }).catch(() => null);
   check('the chart overlay rendered', shot3 !== null);
 
@@ -994,6 +1027,64 @@ try {
   });
   check('ramming a belt rock hurts', rockRam.after < rockRam.before,
     rockRam.before.toFixed(0) + ' -> ' + rockRam.after.toFixed(0) + ' hull');
+
+  // --- Rocks can be shot ---------------------------------------------------
+  // The whole rock path existed (`SHIP_HP.asteroid`, `userData.cargo`,
+  // `userData.hp`) and no shot could reach it: `fireLaser` raycast against
+  // traffic and incoming missiles only, so the belt was solid scenery and the
+  // ore in it was unreachable. Aim at the nearest rock, fire enough times to
+  // break it, and check both that the rock leaves the belt and that a canister
+  // appears to scoop.
+  const rockShot = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    const rocks = g.session.scene.rocks;
+    const before = rocks.length;
+    const rock = rocks[0];
+    const f = g.session.flight;
+    // Hover off the rock and face it dead on, well inside the 900 m raycast.
+    f.pos.x = rock.position.x + 260;
+    f.pos.y = rock.position.y;
+    f.pos.z = rock.position.z;
+    f.vel.x = 0; f.vel.y = 0; f.vel.z = 0;
+    g.faceToward({
+      x: rock.position.x - f.pos.x,
+      y: rock.position.y - f.pos.y,
+      z: rock.position.z - f.pos.z,
+    });
+    g.player.energy = g.player.energyMax;
+    g.player.heat = 0;
+    g.session.grace = 0;
+    const cargoBefore = g.session.traffic.ships.filter(
+      (s) => s.kind === 'canister').length;
+    let shots = 0;
+    let hp = rock.userData.hp;
+    // Pulse laser does 7 a shot against 40 hp, so six hits break it. Cap the
+    // loop well above that: if the fix regressed, the rock simply never dies.
+    for (let i = 0; i < 40 && rocks.indexOf(rock) >= 0; i += 1) {
+      g.player.energy = g.player.energyMax;   // keep the trigger honest
+      g.player.heat = 0;
+      g.session.shotCooldown = 0;
+      g.fireLaser();
+      shots += 1;
+    }
+    const cargoAfter = g.session.traffic.ships.filter(
+      (s) => s.kind === 'canister').length;
+    return {
+      hpBefore: hp, hpAfter: rock.userData.hp, shots: shots,
+      rocksBefore: before, rocksAfter: rocks.length,
+      cargoBefore: cargoBefore, cargoAfter: cargoAfter,
+      rockCargo: rock.userData.cargo,
+    };
+  });
+  check('a laser damages a belt rock', rockShot.hpAfter < rockShot.hpBefore,
+    'hp ' + rockShot.hpBefore + ' -> ' + rockShot.hpAfter + ' after ' + rockShot.shots + ' shots');
+  check('a rock broken by laser leaves the belt',
+    rockShot.rocksAfter < rockShot.rocksBefore,
+    rockShot.rocksBefore + ' -> ' + rockShot.rocksAfter + ' rocks');
+  check('a broken rock releases cargo',
+    rockShot.cargoAfter > rockShot.cargoBefore,
+    'canisters ' + rockShot.cargoBefore + ' -> ' + rockShot.cargoAfter
+    + ' (ore was ' + rockShot.rockCargo + ')');
 
   // --- Respawn frees the old system -------------------------------------
   // Death and a new career used to bypass the teardown: each respawn

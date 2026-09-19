@@ -104,8 +104,23 @@ test('two cargoes on one route do not share an id', () => {
   assert.ok(M.offerId(courier).endsWith(':'),
     'a commodity-less contract should leave an empty final slot');
   assert.equal(M.offerId(courier).replace(/:$/, ''),
-    'courier:1:2:4:0',
+    'courier:1:2:0:4:0',
     'the id format changed for a contract that carries no commodity');
+});
+
+test('the same deadline reached from different start days does not collide', () => {
+  // The deadline was carried as the *sum* `day + days`, so a job posted on day
+  // 0 with 10 days to run and one posted on day 5 with 5 days to run both read
+  // "deadline 10" and shared an id - even though they are different jobs at
+  // different points in the same commander's career. The sum is what a screen
+  // shows; the pair is what identifies the job.
+  const early = { type: 'delivery', system: { index: 1 }, target: { index: 2 },
+    commodity: 'FOOD', tons: 5, days: 10, day: 0 };
+  const late = Object.assign({}, early, { days: 5, day: 5 });
+  assert.equal(early.day + early.days, late.day + late.days,
+    'the fixture is wrong: both must land on the same deadline day');
+  assert.notEqual(M.offerId(early), M.offerId(late),
+    'two jobs with the same deadline from different start days collided');
 });
 
 test('the same two cargoes can both be accepted', () => {

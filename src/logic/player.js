@@ -500,8 +500,15 @@ function validateSave(d, options) {
       return k === '__proto__' || k === 'constructor' || k === 'prototype';
     });
   }
+  // Every object-valued field in the record, at the top level. This list used
+  // to omit `contracts`, which is the one that matters most: it is an *array of
+  // objects* and each element is merged into the live contract list, so a
+  // `__proto__` key inside a single contract slipped past a guard that only
+  // looked at top-level field names. `deserialize` also spreads `d.standing`
+  // and `d.systemMemory` value-by-value, so the nested case is checked below
+  // too. A whitelist that admits arbitrary keys is half a whitelist.
   var guarded = ['cargo', 'equip', 'standing', 'wanted', 'visited',
-    'systemMemory', 'costBasis'];
+    'systemMemory', 'costBasis', 'contracts', 'system'];
   for (var g = 0; g < guarded.length; g += 1) {
     if (hasDangerousKey(d[guarded[g]])) {
       reasons.push(guarded[g] + ' carries a prototype key');
@@ -535,6 +542,42 @@ function validateSave(d, options) {
     if (typeof d[pk] === 'number' && isFinite(d[pk]) && d[pk] <= 0) {
       reasons.push(pk + ' is not positive');
     }
+  }
+  // --- Upper bounds ---------------------------------------------------------
+  // The checks above are all floor-and-type: they accept `cash: 1e15` and
+  // `fuelMax: 1e9` as readily as a real record. These are not states the game
+  // can reach, only a hand-edited save, and two of them are load-bearing:
+  //
+  //  - `cash` is formatted on the station screen and spent in the market, and a
+  //    value beyond the integer range silently loses precision in arithmetic.
+  //  - `fuelMax` *is* the jump range (`canJump` compares light years against
+  //    it, and the chart draws a range ring at that radius), so a huge tank
+  //    permits jumps across the whole galaxy and turns every route off.
+  //
+  // The ceilings are deliberately loose - an order of magnitude above anything
+  // reachable in play - because this is here to reject nonsense, not to police
+  // balance, and a tight bound would start refusing legitimate saves the moment
+  // a balance number changed.
+  var ceilings = {
+    cash: 1e9, day: 1e6, fuel: 1e4, fuelMax: 1e4, hull: 1e5, hullMax: 1e5,
+    shields: 1e5, shieldMax: 1e5, missiles: 1e3, kills: 1e6, activity: 1e9,
+    offences: 1e6, bountyPending: 1e6,
+  };
+  var clKeys = Object.keys(ceilings);
+  for (var cl = 0; cl < clKeys.length; cl += 1) {
+    var ck = clKeys[cl];
+    if (typeof d[ck] === 'number' && isFinite(d[ck]) && d[ck] > ceilings[ck]) {
+      reasons.push(ck + ' is beyond any reachable value');
+    }
+  }
+  // `fuel` above `fuelMax` is a free refuel for ever: `refuel` returns
+  // `{ reason: 'full' }` and the tank never drops below the max. Only checked
+  // when both are usable numbers, so a save already rejected above does not
+  // collect a second, misleading reason.
+  if (typeof d.fuel === 'number' && isFinite(d.fuel)
+    && typeof d.fuelMax === 'number' && isFinite(d.fuelMax) && d.fuelMax > 0
+    && d.fuel > d.fuelMax) {
+    reasons.push('fuel exceeds fuelMax');
   }
   // `day`, `missiles` and `kills` move in whole steps. `_offences` does not:
   // the record decays half a point per day, so a fractional value is a
@@ -676,6 +719,14 @@ function validateSave(d, options) {
           reasons.push('memory of system ' + skeys[s] + ' is not an object');
           continue;
         }
+        // The memory *value* is merged into the live memory object, so a
+        // prototype key here is the same sink one level down. Checked per value
+        // rather than on the container, because the container's own keys are
+        // system indices and `__proto__` would not survive as a string index.
+        if (hasDangerousKey(mem)) {
+          reasons.push('memory of system ' + skeys[s] + ' carries a prototype key');
+          continue;
+        }
         var fkeys = Object.keys(mem);
         for (var u = 0; u < fkeys.length; u += 1) {
           var fv = mem[fkeys[u]];
@@ -706,6 +757,10 @@ function validateSave(d, options) {
         var con = d.contracts[k];
         if (!con || typeof con !== 'object') {
           reasons.push('contract ' + k + ' is not an object');
+        } else if (hasDangerousKey(con)) {
+          // Accepted by `Object.assign` into the live contract, so this is the
+          // same prototype sink as a top-level field.
+          reasons.push('contract ' + k + ' carries a prototype key');
         } else if (typeof con.deadlineDay !== 'number' || !isFinite(con.deadlineDay)) {
           reasons.push('contract ' + k + ' has no usable deadline');
         } else {

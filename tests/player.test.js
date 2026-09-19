@@ -341,6 +341,57 @@ test('a save carrying a prototype key is rejected', () => {
   assert.match(v.reason, /prototype/);
 });
 
+test('a prototype key nested inside a contract or a memory is rejected too', () => {
+  // The guard used to walk only the top-level field names, so a `__proto__`
+  // inside a contract - an array element that is spread into the live contract -
+  // went straight through. A whitelist that admits arbitrary keys in the objects
+  // it is supposed to be guarding is half a whitelist.
+  const inContract = goodSave();
+  inContract.contracts = [JSON.parse('{"deadlineDay":40,"__proto__":{"polluted":1}}')];
+  const cv = P.validateSave(inContract, VOCAB);
+  assert.equal(cv.ok, false, 'a prototype key inside a contract was accepted');
+  assert.match(cv.reason, /prototype/);
+
+  const inMemory = goodSave();
+  inMemory.systemMemory = JSON.parse('{"7":{"visits":1,"__proto__":{"polluted":1}}}');
+  const mv = P.validateSave(inMemory, VOCAB);
+  assert.equal(mv.ok, false, 'a prototype key inside a memory was accepted');
+  assert.match(mv.reason, /prototype/);
+});
+
+test('values beyond anything reachable in play are rejected', () => {
+  // Floor-and-type checks alone accept `cash: 1e15` as readily as a real
+  // record. `fuelMax` is the worst of them because it *is* the jump range:
+  // `canJump` compares light years against it and the chart draws a range ring
+  // at that radius, so an enormous tank permits jumps across the whole galaxy
+  // and turns every route off the graph.
+  assert.equal(P.validateSave(goodSave({ cash: 1e15 }), VOCAB).ok, false,
+    'an absurd purse was accepted');
+  assert.equal(P.validateSave(goodSave({ fuelMax: 1e9 }), VOCAB).ok, false,
+    'an absurd tank was accepted');
+  assert.equal(P.validateSave(goodSave({ day: 1e9 }), VOCAB).ok, false,
+    'an absurd day count was accepted');
+  // And a tank holding more than it can hold, which is a free refuel for ever.
+  assert.equal(P.validateSave(goodSave({ fuel: 999, fuelMax: 14 }), VOCAB).ok, false,
+    'fuel above the tank maximum was accepted');
+});
+
+test('the ceilings do not refuse a save the game actually writes', () => {
+  // The bounds are deliberately an order of magnitude above anything reachable;
+  // this is the test that fails the moment someone tightens one too far.
+  const rich = goodSave();
+  rich.cash = 5000000;          // a long career's fortune
+  rich.day = 4000;              // over ten game years
+  rich.kills = 3000;
+  rich.activity = 100000;
+  rich.hull = 100; rich.hullMax = 100;
+  rich.shields = 60; rich.shieldMax = 60;
+  rich.fuel = 14; rich.fuelMax = 14;
+  rich.missiles = 4;
+  const v = P.validateSave(rich, VOCAB);
+  assert.equal(v.ok, true, 'a plausible veteran save was rejected: ' + v.reason);
+});
+
 test('a decayed offence record is valid', () => {
   // The record decays half a point per day, so `_offences` is routinely
   // fractional. Requiring it whole rejected every save older than a day

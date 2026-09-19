@@ -13,10 +13,8 @@
  *      station (0,0,0)          <- you always arrive here
  *      planet  (~1800 out)      <- a big sphere, mostly scenery to fly past
  *      star    (~9000 out)      <- pure backdrop; you cannot reach it
-  *      asteroid belt (2200-3400) <- cover; solid, ramming one hurts.
-  *                                     (Ore can be assayed but not mined:
-  *                                      rocks carry cargo and hp, but no shot
-  *                                      of the player's can reach them yet.)
+ *      asteroid belt (2200-3400) <- cover; solid, ramming one hurts, and the
+ *                                     ore can be shot out of a rock with a laser.
  *      wormhole / sun glare     <- hazard zone, hostile traffic
  *
  * Traffic spawns procedurally in a shell around the station and despawns when
@@ -889,17 +887,28 @@ export function createTraffic(scene, system, seed, options) {
         removed += 1;
         continue;
       }
-      const d = Math.hypot(s.mesh.position.x, s.mesh.position.y, s.mesh.position.z);
-      if (d > LAYOUT.despawnDistance) {
-        scene.remove(s.mesh);
-        // Free the hull, the edge overlay and the engine flame with it. Each
-        // ship is built from its own geometry (`makeShip` allocates fresh), so
-        // skipping this leaks a handful of buffers and materials per despawn -
-        // which is a steady climb over a long session in one system, invisible
-        // in a short test because a hyperspace jump clears the whole scene.
-        disposeTree(s.mesh);
-        ships.splice(i, 1);
-        removed += 1;
+      // Wreckage is exempt from the distance rule. The shell exists to recycle
+      // *traffic* that has drifted out of play, and a canister is not traffic:
+      // it is a reward deliberately left where the player can reach it, and it
+      // does not move. Applying the rule to it silently deleted ore dropped in
+      // the outer belt - `despawnDistance` is 2600 while the belt spans
+      // 2200-3400, so roughly the outer third of the belt dropped cargo that was
+      // culled on the very next prune, before it could ever be scooped. Found by
+      // firing at a rock in the belt; the rock broke, the canister appeared, and
+      // it was gone a frame later.
+      if (!s.canister && !s.capsule) {
+        const d = Math.hypot(s.mesh.position.x, s.mesh.position.y, s.mesh.position.z);
+        if (d > LAYOUT.despawnDistance) {
+          scene.remove(s.mesh);
+          // Free the hull, the edge overlay and the engine flame with it. Each
+          // ship is built from its own geometry (`makeShip` allocates fresh), so
+          // skipping this leaks a handful of buffers and materials per despawn -
+          // which is a steady climb over a long session in one system, invisible
+          // in a short test because a hyperspace jump clears the whole scene.
+          disposeTree(s.mesh);
+          ships.splice(i, 1);
+          removed += 1;
+        }
       }
     }
     return removed;

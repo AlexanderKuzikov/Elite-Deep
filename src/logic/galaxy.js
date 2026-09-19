@@ -414,7 +414,7 @@ function findByName(galaxy, name) {
  *
  * **Walks the route graph, not straight lines.** Only `galaxy.routes` edges can
  * be jumped, and an edge is passable only when its length in light years is
- * within a full tank - that is exactly what `canJump` enforces in the game. A
+ * within a full tank - see `routeBetween` for the one-hop form of that rule. A
  * straight-line metric would call two systems four light years apart "close"
  * even when no chain of routes connects them at all.
  *
@@ -465,6 +465,47 @@ function hopsBetween(galaxy, fromIndex, toIndex, fuel) {
   return Infinity;
 }
 
+/**
+ * Is there a *direct* route edge from one system to another, passable on `fuel`?
+ *
+ * This is the one-hop form of `hopsBetween`, and it exists because the game had
+ * two different ideas of what "in range" means. `canJump` in `main.js` compared
+ * the straight-line distance against the tank and nothing else, while the board
+ * walked the route graph - so a commander with the 14 ly tank could jump
+ * **27 % of all legal jumps to a system no route edge connects to**, off the
+ * graph entirely. Measured over 12 seeds: 1294 of 4732 jumps.
+ *
+ * The route graph is the real rule; a straight line is not flyable. Systems
+ * that are close in space but unlinked are left unlinked on purpose - the
+ * generator caps lane length at `JUMP_REFERENCE * 1.6` and then adds a second
+ * exit to every dead end, so a missing edge is a decision, not an oversight.
+ *
+ * Returns the edge length in light years, or `null` when there is no usable
+ * edge. The length is returned rather than a boolean because every caller
+ * needs it anyway - `canJump` reports the distance, and the board prices the
+ * reward by it. A zero-length edge cannot exist (it would be a duplicated
+ * system), so `null` is an unambiguous "no edge".
+ */
+function routeBetween(galaxy, fromIndex, toIndex, fuel) {
+  if (fromIndex === toIndex) return null;
+  if (!(fuel > 0)) return null;
+  var ly = galaxy.jumpReference ? 7 / galaxy.jumpReference : 0.194;
+  for (var r = 0; r < galaxy.routes.length; r++) {
+    var route = galaxy.routes[r];
+    var a = route.a;
+    var b = route.b;
+    if (!((a === fromIndex && b === toIndex) || (a === toIndex && b === fromIndex))) continue;
+    var len = route.dist * ly;
+    // A route longer than the tank is drawn on the chart but cannot be jumped.
+    // The generator creates such edges deliberately: every system is promised a
+    // second exit even when the nearest unconnected neighbour exceeds the
+    // reference range, because a one-exit system is a prison for a dry tank.
+    if (len > fuel) return null;
+    return len;
+  }
+  return null;
+}
+
 export {
   SYSTEM_COUNT,
   DISC_RADIUS,
@@ -475,6 +516,7 @@ export {
   neighbors,
   findByName,
   hopsBetween,
+  routeBetween,
 };
 
 /**
@@ -483,5 +525,5 @@ export {
  */
 export default {
   SYSTEM_COUNT, DISC_RADIUS, JUMP_REFERENCE, STAR_CLASSES,
-  generate, distance, neighbors, findByName, hopsBetween,
+  generate, distance, neighbors, findByName, hopsBetween, routeBetween,
 };

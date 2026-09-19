@@ -7,8 +7,8 @@
 | Установка | `npm install` |
 | Dev-сервер | `npm run dev` |
 | Сборка одного файла | `npm run build` → `dist/index.html` |
-| Юнит-тесты | `npm test` (650) |
-| E2E | `npm run e2e` (63 проверки, headless Chrome) |
+| Юнит-тесты | `npm test` (692) |
+| E2E | `npm run e2e` (91 проверка, headless Chrome) |
 | Симуляция экономики | `node scripts/economy-sim.mjs [прыжков]` |
 | Всё сразу | `npm run check` (тесты + сборка + e2e) |
 
@@ -22,7 +22,7 @@ src/
 ├── main.js          # единственный файл, знающий обо всех остальных
 ├── logic/           # чистая логика, ноль импортов three
 │   ├── rng.js       # mulberry32, hash2, rand01, int, pick, chance, shuffle, noise1, noise3, fbm3, ridged3
-│   ├── galaxy.js    # генерация 64 систем, MST-граф маршрутов, JUMP_REFERENCE
+│   ├── galaxy.js    # генерация 64 систем, MST-граф маршрутов, JUMP_REFERENCE, hopsBetween, routeBetween
 │   ├── economy.js   # 19 товаров, computeMarket
 │   ├── player.js    # ранг, инвентарь, рейтинг
 │   ├── factions.js  # правительства, экономики, опасность, враждебность

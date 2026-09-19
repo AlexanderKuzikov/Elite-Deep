@@ -164,6 +164,69 @@ test('distance is symmetric and zero for a system to itself', () => {
   assert.strictEqual(G.distance(a, a), 0);
 });
 
+test('routeBetween agrees with the route list and rejects off-graph pairs', () => {
+  const FUEL = 14;              // the upgraded tank
+  const gal = G.generate(1984);
+  const ly = 7 / gal.jumpReference;
+
+  // Every route shorter than the tank must be found, in both directions, and
+  // the length it reports must be the route's own length.
+  for (const r of gal.routes) {
+    const len = r.dist * ly;
+    if (len > FUEL) continue;
+    assert.ok(Math.abs(G.routeBetween(gal, r.a, r.b, FUEL) - len) < 1e-9,
+      'route ' + r.a + '-' + r.b + ' was not found by routeBetween');
+    assert.ok(Math.abs(G.routeBetween(gal, r.b, r.a, FUEL) - len) < 1e-9,
+      'routeBetween is not symmetric for ' + r.a + '-' + r.b);
+  }
+
+  // A route longer than the tank is drawn on the chart but is not jumpable.
+  const long = gal.routes.find((r) => r.dist * ly > FUEL);
+  if (long) {
+    assert.strictEqual(G.routeBetween(gal, long.a, long.b, FUEL), null,
+      'a lane longer than the tank was reported as jumpable');
+  }
+
+  // Nothing to itself, and nothing with no fuel.
+  assert.strictEqual(G.routeBetween(gal, 3, 3, FUEL), null);
+  assert.strictEqual(G.routeBetween(gal, 0, 1, 0), null);
+});
+
+test('near in space is not the same as linked by a lane', () => {
+  // The defect this guards: `canJump` compared straight-line distance against
+  // the tank and ignored the route graph, so on the 14 ly tank a commander could
+  // jump to systems no lane connects. The two rules must be kept apart, and this
+  // asserts the galaxy actually contains such pairs - otherwise the fix in
+  // `canJump` is untestable and the next refactor can quietly drop it.
+  const FUEL = 14;
+  let offGraphInRange = 0;
+  let inRangeTotal = 0;
+
+  for (const seed of SEEDS) {
+    const gal = G.generate(seed);
+    const ly = 7 / gal.jumpReference;
+    for (const from of gal.systems) {
+      for (const to of gal.systems) {
+        if (from.index === to.index) continue;
+        const d = G.distance(from, to) * ly;
+        if (d > FUEL) continue;
+        inRangeTotal++;
+        if (G.routeBetween(gal, from.index, to.index, FUEL) === null) offGraphInRange++;
+      }
+    }
+  }
+
+  assert.ok(inRangeTotal > 0, 'no in-range pairs at all; the probe is broken');
+  assert.ok(offGraphInRange > 0,
+    'expected in-range pairs with no lane: the graph and the range check have '
+    + 'become the same thing, so this test no longer tests anything');
+  // Always the minority: lanes cover most of what is in range, so a future
+  // generator change that broke the graph would show up here as a surge.
+  assert.ok(offGraphInRange / inRangeTotal < 0.5,
+    'more than half of all in-range pairs are off-graph: ' + offGraphInRange
+    + ' of ' + inRangeTotal + ', which suggests the graph, not the check, is wrong');
+});
+
 test('neighbors respects the range and sorts by distance', () => {
   const gal = G.generate(1984);
   const lave = gal.systems[0];

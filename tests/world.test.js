@@ -158,6 +158,47 @@ test('prune removes destroyed ships', () => {
   assert.equal(traffic.ships.length, 1);
 });
 
+test('prune does not delete wreckage that lies outside the shell', () => {
+  // The failure this guards, found by firing a laser at a belt rock: ore was
+  // dropped, adopted, and culled on the very next frame. `despawnDistance` is
+  // 2600 and the belt spans 2200-3400, so roughly the outer third of the belt
+  // dropped cargo that could never be scooped. The shell exists to recycle
+  // traffic that drifted out of play; a canister is a stationary reward left
+  // where the player can reach it, so it is exempt.
+  const parent = new THREE.Group();
+  const traffic = W.createTraffic(parent, home, 8);
+  const dropped = W.dropCargo(parent, { x: 10, y: 0, z: 0 }, 'minerals', 99);
+  traffic.addWreckage(dropped);
+
+  for (const can of traffic.ships) {
+    can.mesh.position.set(W.LAYOUT.despawnDistance + 700, 0, 0);
+  }
+  const before = traffic.ships.length;
+  assert.ok(before > 0, 'the fixture added no wreckage');
+
+  traffic.prune();
+  assert.equal(traffic.ships.length, before,
+    'wreckage outside the despawn sphere was culled');
+  // And it must stay in the scene too, or it is invisible rather than absent.
+  assert.equal(parent.children.length, before,
+    'the wreckage was removed from the scene');
+});
+
+test('prune still recycles a canister once it is scooped or dead', () => {
+  // The exemption is from the *distance* rule only. A collected canister is
+  // marked dead, and a dead entity must still leave the list and the scene, or
+  // the belt fills with the wrecks of everything the player ever picked up.
+  const parent = new THREE.Group();
+  const traffic = W.createTraffic(parent, home, 8);
+  const dropped = W.dropCargo(parent, { x: 10, y: 0, z: 0 }, 'minerals', 99);
+  traffic.addWreckage(dropped);
+  traffic.ships[0].mesh.position.set(W.LAYOUT.despawnDistance + 700, 0, 0);
+  traffic.ships[0].dead = true;
+  const before = traffic.ships.length;
+  traffic.prune();
+  assert.ok(traffic.ships.length < before, 'a dead canister was kept for ever');
+});
+
 test('dropped cargo can actually be reached by the collision scan', () => {
   // The whole point of the mechanic, and the one thing that was broken: the
   // kill handler built the canisters and threw the array away, so nothing the
