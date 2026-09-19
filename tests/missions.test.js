@@ -798,6 +798,24 @@ test('a dangerous lawful system always offers a cleanup job', () => {
   assert.ok(checked > 100, 'the fixture only exercised ' + checked + ' boards');
 });
 
+test('an anarchy posts no cleanup job, however dangerous', () => {
+  // Nobody collects taxes where there is no law, so nobody pays bounties.
+  // The filter is danger-only otherwise, so this needs systems dangerous
+  // enough to qualify on danger alone, flipped to gov 0.
+  let checked = 0;
+  for (const s of galaxy.systems) {
+    if (F.dangerOf(0, s.faction, s.condition) <= 0.25) continue;
+    const wild = Object.assign({}, s, { gov: 0 });
+    for (const seed of [1, 77]) {
+      const board = M.generateBoard(wild, galaxy, P.create(), seed, 0);
+      assert.equal(board.filter((o) => o.type === 'bounty').length, 0,
+        wild.name + ' is an anarchy but posted a cleanup job');
+      checked += 1;
+    }
+  }
+  assert.ok(checked > 0, 'no dangerous-anarchy fixture to check');
+});
+
 test('a calm system is not offered a cleanup job', () => {
   // The other half of the rule: a system with nothing to clear should not
   // invent a job. Without this the reservation would just be "always one".

@@ -61,7 +61,7 @@ var EQUIPMENT = [
   },
   {
     id: 'dock', name: 'Docking Computer', price: 2500, once: true,
-    desc: 'Docks the ship for you when aligned with the slot. Removes the hardest part of flying.',
+    desc: 'Widens the docking envelope: more offset and angle tolerated. You still fly the approach yourself.',
   },
   {
     id: 'beamLaser', name: 'Beam Laser', price: 4000, once: true,

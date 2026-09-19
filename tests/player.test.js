@@ -693,6 +693,19 @@ test('the scoop does not promise fuel skimming', async () => {
     'the star has moved close enough that skimming would be a different feature');
 });
 
+test('the docking computer does not promise to fly for you', () => {
+  // It read "docks the ship for you" and "removes the hardest part of
+  // flying". Neither is true: auto-dock is free for everyone, and what the
+  // computer buys is a wider envelope - which the verdict tests pin
+  // separately. The description has to sell the envelope, not the pilot.
+  const desc = P.equipmentFor('dock').desc;
+  assert.ok(!/docks the ship for you|automatically|removes the hardest/i.test(desc),
+    'the computer promises a pilot again: ' + desc);
+  assert.ok(/envelope/i.test(desc), 'the description no longer names what it widens');
+  assert.ok(/fly.*yourself|yourself/i.test(desc),
+    'the description no longer says who flies');
+});
+
 test('every item in the shop says what it does', () => {
   for (const item of P.EQUIPMENT) {
     assert.ok(item.id, 'an item has no id');

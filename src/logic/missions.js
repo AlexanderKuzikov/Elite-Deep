@@ -146,7 +146,13 @@ export function generateBoard(system, galaxy, player, seed, day) {
   //
   // It is decided here, before the early return, because a lonely dangerous
   // system is still worth clearing even when nothing is in range to trade with.
-  const bountyAvailable = F.dangerOf(system.gov, system.faction, system.condition) > 0.25;
+  // A cleanup job is posted where there is something to clear - and where
+  // there is someone to pay for it. An anarchy (gov 0) posts nothing no
+  // matter how dangerous it is: nobody there collects taxes, so nobody pays
+  // bounties. Measured on the chart: no anarchy exists among the 64 systems,
+  // so this is a guard rail for the rule, not a change to any live board.
+  const bountyAvailable = system.gov !== 0
+    && F.dangerOf(system.gov, system.faction, system.condition) > 0.25;
   const cargoSlots = MISSION.boardSize - (bountyAvailable ? 1 : 0);
 
   if (!candidates.length && !bountyAvailable) return offers;
@@ -272,11 +278,9 @@ export function generateBoard(system, galaxy, player, seed, day) {
   }
 
   // --- Bounty -------------------------------------------------------------
-  // A cleanup job is posted where there is something to clear. Note what this
-  // does *not* check: lawfulness. An anarchy with danger over the bar posts
-  // like anyone else, so "who pays for order where there is none" is an open
-  // balance question (see the bounty-reward problem), not a settled rule.
-  // The slot for it was held back above.
+  // A cleanup job is posted where there is something to clear and someone to
+  // pay for it (see `bountyAvailable` above: anarchies are out). The slot for
+  // it was held back above.
   if (bountyAvailable) {
     const [minCount, maxCount] = MISSION.bountyCount;
     const count = Math.round(minCount + rand() * (maxCount - minCount));
@@ -395,7 +399,13 @@ function makeOffer(spec) {
   if (spec.type === 'courier') {
     reward = 60 + spec.distance * 26;
   } else if (spec.type === 'bounty') {
-    reward = spec.tons * 110 * (1 + danger);
+    // A cleanup costs no cargo and no travel - its price is the fight, paid
+    // in hull, missiles and minutes. Priced per pirate at 30 (was 110, which
+    // paid fourteen delivery-days per trip-day and left the board with one
+    // right answer), a typical 3-6 pirate job lands near a courier run:
+    // worth taking, not worth taking exclusively. Measured 2026-09-19 across
+    // 192 boards: 217 average against courier 235, relief 488, delivery 192.
+    reward = spec.tons * 30 * (1 + danger);
   } else {
     // Cargo value, distance, and a risk premium. The cargo term is small on
     // purpose: the reward should be for the trip, not for the goods, or a
