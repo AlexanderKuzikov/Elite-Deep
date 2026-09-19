@@ -375,6 +375,10 @@ export function boot(host, options) {
    *               separately by `undock`)
    */
   function enterSystem(index, arrival) {
+    // The old system goes first, whatever brought us here. Jump, respawn and
+    // new career all arrive through this function, so this is the one place
+    // that can guarantee the previous scene is freed.
+    teardownScene();
     const system = galaxy.systems[index];
     session.index = index;
     session.system = system;
@@ -402,11 +406,8 @@ export function boot(host, options) {
     // The lights belong to the system, not to the scene. Adding a fresh set on
     // every jump left the previous system's star still lighting the new one,
     // and four more objects in the scene each time - for ever. Measured before
-    // the fix: 21 directional lights after twenty jumps.
-    for (const light of session.systemLights) {
-      renderer.scene.remove(light);
-      if (light.target) renderer.scene.remove(light.target);
-    }
+    // the fix: 21 directional lights after twenty jumps. The old lights are
+    // already gone: `teardownScene` at the top of this function removed them.
     renderer.setSystemGroup(scene.root);
     const cockpitLight = WORLD.makeCockpitLight();
     session.systemLights = [scene.sunLight, scene.planetLight, cockpitLight];
@@ -417,10 +418,9 @@ export function boot(host, options) {
     // The haze is the scene's, not the group's, so it has to be re-applied.
     renderer.scene.fog = scene.haze;
 
-    // The previous system's fleet belongs to the previous system. It lives in
-    // the scene rather than in the system group, so nothing else takes it away.
-    if (session.traffic) session.traffic.dispose();
-
+    // The previous system's fleet went with the teardown at the top of this
+    // function: traffic lives in the scene rather than in the system group,
+    // so nothing else takes it away.
     session.flight = FLIGHT.createFlight();
     session.traffic = WORLD.createTraffic(renderer.scene, system, seed, {
       dangerDelta: REP.memoryDangerDelta(memory),
@@ -569,6 +569,14 @@ export function boot(host, options) {
     if (mode === MODE.DEAD) {
       // Quiet for the same reason: the death screen needs the cursor, and the
       // player did not ask to be there.
+      INPUT.releaseMouse(input, true);
+    }
+    if (mode === MODE.TITLE && previous === MODE.FLIGHT) {
+      // Quiet as well: pausing to the title from flight is the game parking
+      // the ship, not the player asking for the cursor. Without this the lock
+      // stays held over the title screen and the first click goes to the game
+      // instead of the screen. (From docked/dead/chart there is no lock to
+      // release, so only the flight transition matters.)
       INPUT.releaseMouse(input, true);
     }
     // The "your pointer is free" notice belongs to the flight view and to a
@@ -739,7 +747,12 @@ export function boot(host, options) {
    * turn over - a station is not offering the same three jobs forever.
    */
   function boardFor() {
-    const key = session.index + ':' + player.day;
+    // The board depends on the ship as well as the place and day: the tank
+    // sizes the reachable set, the hold sizes the tonnage band, and activity
+    // moves the market the stock clamp reads. Without them in the key, buying
+    // a fuel tank or a cargo bay served the pre-purchase board until tomorrow.
+    const key = session.index + ':' + player.day + ':' + player.fuelMax + ':'
+      + PLAYER.holdMaxOf(player) + ':' + Math.floor(player.activity);
     if (session.boardKey !== key) {
       session.boardKey = key;
       const seed = (GALAXY_SEED ^ (session.index * 2246822519) ^ (player.day * 2654435761)) >>> 0;
@@ -1155,7 +1168,7 @@ export function boot(host, options) {
     const target = session.jumpTarget;
     session.jumpTarget = null;
     if (target === null || target === undefined) return;
-    commitJumpScene();
+    // Teardown rides inside `enterSystem`, so every arrival path frees.
     enterSystem(target, 'station');
     setMode(MODE.FLIGHT);
     // Arriving anywhere is worth saving, because witchspace interdiction is
@@ -1164,30 +1177,31 @@ export function boot(host, options) {
   }
 
   /**
-   * Tear down the previous system's scene.
+   * Tear down the previous system's scene. Single owner of the teardown:
+   * `enterSystem` calls this first, so every arrival path - jump, respawn
+   * after death, new career from the title - frees the old system. Before,
+   * only the jump path tore down (via `commitJumpScene`), and each death or
+   * new career abandoned a station, a planet and ninety rocks in the scene.
    *
    * Three's `Object3D` has no recursive dispose, and a system holds a station,
    * a planet, 90 rocks and up to a dozen ships. Leaking them means a visible
    * memory climb after four or five jumps - and `renderer.setSystemGroup`
    * only detaches the root, it does not free it.
    */
-  function commitJumpScene() {
+  function teardownScene() {
     const previous = session.scene;
     if (!previous) return;
     // Traffic meshes are added to the renderer's scene directly, not to the
-    // system group, so they have to be removed by hand.
-    if (session.traffic) {
-      for (const s of session.traffic.ships) {
-        renderer.scene.remove(s.mesh);
-        disposeTree(s.mesh);
-      }
-    }
+    // system group, so they are taken out by `dispose`, which removes each
+    // ship from the scene as well as freeing it.
+    if (session.traffic) session.traffic.dispose();
     renderer.scene.remove(previous.root);
     renderer.scene.remove(previous.sunLight);
     renderer.scene.remove(previous.sunLight.target);
     renderer.scene.remove(previous.planetLight);
     disposeTree(previous.root);
     renderer.scene.fog = null;
+    session.scene = null;
   }
 
   // `disposeTree` now lives in `sim/dispose.js`, shared with `world.js`, so the
@@ -1207,9 +1221,9 @@ export function boot(host, options) {
    * drift, contract deadlines, the decay of offences and bounties - reads
    * `player.day`, so this function is the single definition of what a day is.
    *
-   * It used to be described elsewhere as "a day is a dock, a jump is free",
-   * and that was never true. `commitJumpScene` tears the old system down and
-   * `enterSystem` builds the new one, but arriving at the station is not
+    * It used to be described elsewhere as "a day is a dock, a jump is free",
+    * and that was never true. `teardownScene` tears the old system down and
+    * `enterSystem` builds the new one, but arriving at the station is not
    * docking: only the `dock()` path runs the contract desk and the save. So a
    * hop in the game costs a day, and a three-hop contract genuinely spends
    * three days in transit before the dock at the far end spends the fourth.
@@ -2552,42 +2566,61 @@ export function boot(host, options) {
     }
 
     // --- Asteroids, cargo and capsules -----------------------------------
+    // Belt rocks are plain scenery meshes, not traffic ships, so they need
+    // their own pass: the loop below never sees them. Before this pass the
+    // rock branch was unreachable and the belt was fly-through.
+    if (session.scene && session.scene.rocks) {
+      for (const rock of session.scene.rocks) {
+        const radius = (rock.userData && rock.userData.radius) || 8;
+        if (WORLD.dist(f.pos, rock.position) < radius + 3) {
+          if (hitRock(rock.position, radius)) return;
+        }
+      }
+    }
     for (const s of session.traffic.ships) {
       if (s.dead) continue;
-      if (s.kind !== 'asteroid' && s.kind !== 'canister' && s.kind !== 'capsule') continue;
+      if (s.kind !== 'canister' && s.kind !== 'capsule') continue;
       const radius = WORLD.entityRadius(s) + 3;
       const d = WORLD.dist(f.pos, s.mesh.position);
       if (d >= radius) continue;
-      if (s.kind === 'asteroid') {
-        // Rock damage scales with how hard you hit it - a slow bump is a
-        // scratch, a full-throttle ram is a serious accident.
-        const speed = FLIGHT.speedOf(f);
-        const damage = Math.min(34, speed * 0.13);
-        if (damage < 2) continue;      // resting against a rock is not an event
-        hurtPlayer(damage, { pierce: true });
-        noteHit(s.mesh.position);
-        // Push out so the rock does not grind the hull away over the next
-        // hundred frames.
-        const n = {
-          x: (f.pos.x - s.mesh.position.x) / (d || 1),
-          y: (f.pos.y - s.mesh.position.y) / (d || 1),
-          z: (f.pos.z - s.mesh.position.z) / (d || 1),
-        };
-        const push = radius + 2;
-        f.pos.x = s.mesh.position.x + n.x * push;
-        f.pos.y = s.mesh.position.y + n.y * push;
-        f.pos.z = s.mesh.position.z + n.z * push;
-        f.vel.x *= -0.2; f.vel.y *= -0.2; f.vel.z *= -0.2;
-        session.impactCooldown = 0.9;
-        say('Asteroid impact', HUD.HUD_COLOURS.danger);
-        return;
-      }
       // Cargo and capsules are scooped, not collided with. A failed scoop
       // (no room, no scoop fitted) must not impose a cooldown or the player
       // passes straight through the canister they were trying to collect.
       scoop(s);
       if (s.dead) return;
     }
+  }
+
+  /**
+   * Ram a rock. Returns true when the impact landed (and the scan should
+   * stop for this frame). Shared by the belt pass above; traffic ships never
+   * carry kind 'asteroid', so there is no second caller.
+   */
+  function hitRock(rockPos, radius) {
+    const f = session.flight;
+    // Rock damage scales with how hard you hit it - a slow bump is a
+    // scratch, a full-throttle ram is a serious accident.
+    const speed = FLIGHT.speedOf(f);
+    const damage = Math.min(34, speed * 0.13);
+    if (damage < 2) return false;      // resting against a rock is not an event
+    hurtPlayer(damage, { pierce: true });
+    noteHit(rockPos);
+    // Push out so the rock does not grind the hull away over the next
+    // hundred frames.
+    const d = WORLD.dist(f.pos, rockPos);
+    const n = {
+      x: (f.pos.x - rockPos.x) / (d || 1),
+      y: (f.pos.y - rockPos.y) / (d || 1),
+      z: (f.pos.z - rockPos.z) / (d || 1),
+    };
+    const push = radius + 3 + 2;
+    f.pos.x = rockPos.x + n.x * push;
+    f.pos.y = rockPos.y + n.y * push;
+    f.pos.z = rockPos.z + n.z * push;
+    f.vel.x *= -0.2; f.vel.y *= -0.2; f.vel.z *= -0.2;
+    session.impactCooldown = 0.9;
+    say('Asteroid impact', HUD.HUD_COLOURS.danger);
+    return true;
   }
 
   /** Collect a floating canister or capsule. */

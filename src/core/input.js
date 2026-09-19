@@ -530,12 +530,14 @@ export function requestMouse(state) {
     // change event that the release itself fires.
     state.quietRelease = false;
     // Chrome returns a promise here and rejects it when the request is not
-    // backed by a gesture; older browsers return nothing. Either way a failure
-    // must not surface as an unhandled rejection, so it is swallowed and the
-    // refusal is counted instead.
+    // backed by a gesture; older browsers return nothing. A rejection must
+    // not surface as an unhandled rejection, so it is swallowed - but not
+    // counted: the browser *also* fires `pointerlockerror` for the same
+    // gesture, and counting both would score one refusal as two and give up
+    // after a refusal and a half instead of after `giveUpAfter`.
     const asked = target.requestPointerLock();
     if (asked && typeof asked.catch === 'function') {
-      asked.catch(() => { state.lockFailures += 1; });
+      asked.catch(() => { /* counted by onPointerLockError */ });
     }
   } catch (err) {
     state.lockFailures += 1;

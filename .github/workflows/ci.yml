@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: this workflow reads the tree and uploads screenshots, and
+# needs nothing else from the token.
+permissions:
+  contents: read
+
 jobs:
   unit:
     name: Unit tests and build

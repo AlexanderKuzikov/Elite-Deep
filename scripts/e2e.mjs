@@ -79,6 +79,28 @@ function check(name, condition, detail) {
   }
 }
 
+/**
+ * Poll a page-side predicate until it turns true, rather than sleeping a
+ * fixed wall interval and hoping the game kept up. The game's cooldowns tick
+ * in frame dt (capped per frame), and under software rendering a frame can
+ * take a large fraction of a wall second - a fixed sleep asserted too early
+ * here (CI: cooldown still 0.3 s at the ask) and failed a correct game.
+ * Returns true when the predicate held, false on timeout (the caller then
+ * fails its check with the state attached, so the log still tells why).
+ */
+async function waitFor(predicate, timeoutMs, stepMs = 100) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let ok = false;
+    try {
+      ok = await predicate();
+    } catch (err) { ok = false; }
+    if (ok) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise(r => setTimeout(r, stepMs));
+  }
+}
+
 const browser = await puppeteer.launch({
   executablePath: chromePath,
   headless: 'new',
@@ -260,23 +282,31 @@ try {
       return undefined;
     };
   });
-  // Hand the pointer back the way Escape does, and let the cooldown expire on
-  // the live clock. `relockDelay` is 1.4 s; the margin below is for the loop.
+  // Hand the pointer back the way Escape does, then wait out its cooldown on
+  // the *game* clock, not the wall clock: `releasePointer` arms the same 1.4 s
+  // a real Escape arms, and that cooldown ticks in frame dt. Poll the live
+  // state instead of sleeping a fixed interval.
   const released = await page.evaluate(() => {
     const g = window.__ELITE_GAME__;
     const st = g.releasePointer();
     g.setMode('title');
     return { locked: st.locked, relockIn: st.relockIn };
   });
-  await new Promise((r) => setTimeout(r, 2200));
+  const cooldownExpired = await waitFor(
+    () => page.evaluate(() => window.__ELITE_GAME__.debugPointer().relockIn <= 0),
+    30000);
   await page.evaluate(() => {
     // A real keydown on the window: the title screen's launch key. This is the
     // whole point - the capture request has to be reachable from a gesture the
     // player actually makes, not only from a test-only code path.
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM' }));
   });
-  // Let the real frame loop notice and act, which is how a player launches.
-  await new Promise((r) => setTimeout(r, 600));
+  // Let the real frame loop notice and act, which is how a player launches:
+  // poll the probe until the launch asked, rather than assuming N frames ran.
+  const launchAsked = await waitFor(
+    () => page.evaluate(() => window.__ELITE_GAME__.mode === 'flight'
+      && window.__mouseProbe.asked > 0),
+    15000);
   const mouse = await page.evaluate(() => {
     const g = window.__ELITE_GAME__;
     const p = window.__mouseProbe;
@@ -297,10 +327,12 @@ try {
   check('the pointer can be handed back, arming the cooldown a real Escape arms',
     released.locked === false && released.relockIn > 0,
     'locked=' + released.locked + ' relockIn=' + released.relockIn.toFixed(2));
-  check('launching from the title begins flight', mouse.mode === 'flight', mouse.mode);
+  check('launching from the title begins flight', mouse.mode === 'flight', mouse.mode
+    + '; cooldown expired: ' + cooldownExpired + ', launch asked: ' + launchAsked);
   check('the game asks for the pointer when the player launches',
     mouse.asked > 0,
-    'asked=' + mouse.asked + '; state ' + JSON.stringify(mouse.after));
+    'asked=' + mouse.asked + '; state ' + JSON.stringify(mouse.after)
+    + '; cooldown expired: ' + cooldownExpired + ', launch asked: ' + launchAsked);
   check('the pointer is requested on an element that can hold it',
     mouse.asked > 0 && mouse.wrongElement === false && mouse.hasRequestApi === true,
     mouse.asked + ' request(s) on #' + mouse.canvasId
@@ -903,6 +935,97 @@ try {
     death.mode === 'flight' || death.mode === 'dead', death.mode);
   check('the collision caused real damage or death', death.hull < 100,
     'hull ' + death.hull.toFixed(0));
+
+  // --- Belt rocks are solid -------------------------------------------------
+  // Rocks used to be fly-through: they live in the scene group, not in the
+  // traffic list the collision scan walked, so the rock branch never fired.
+  // Park the ship just off a rock's skin at ramming speed and check the hull.
+  // The hit pierces, so full shields change nothing; a dozen stepped frames
+  // at 100 units a second always cross the skin from six units out.
+  const rockRam = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    const rock = g.session.scene.rocks[0];
+    const r = (rock.userData && rock.userData.radius) || 8;
+    const f = g.session.flight;
+    f.pos.x = rock.position.x + r + 6;
+    f.pos.y = rock.position.y;
+    f.pos.z = rock.position.z;
+    f.vel.x = -100; f.vel.y = 0; f.vel.z = 0;
+    g.player.shields = g.player.shieldMax;
+    g.player.hull = g.player.hullMax;
+    g.session.grace = 0;
+    g.session.impactCooldown = 0;
+    const before = g.player.hull;
+    for (let i = 0; i < 12; i += 1) g.step(1 / 60, 600 + i / 60);
+    return { before: before, after: g.player.hull, mode: g.mode };
+  });
+  check('ramming a belt rock hurts', rockRam.after < rockRam.before,
+    rockRam.before.toFixed(0) + ' -> ' + rockRam.after.toFixed(0) + ' hull');
+
+  // --- Respawn frees the old system -------------------------------------
+  // Death and a new career used to bypass the teardown: each respawn
+  // abandoned a station, a planet and ninety rocks in the scene, repeatable
+  // by pressing a key. Kill on purpose and compare the scene population
+  // across one measured death. The margin below is loose on purpose: a
+  // leaked system costs a root plus lights plus a fleet (~14 children),
+  // while a freed one rebuilds to nearly the same count (same seed).
+  async function launchIfDead() {
+    await page.evaluate(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM' }));
+    });
+    return waitFor(
+      () => page.evaluate(() => window.__ELITE_GAME__.mode === 'flight'),
+      15000);
+  }
+  const preDeathMode = await page.evaluate(() => window.__ELITE_GAME__.mode);
+  let ready = preDeathMode === 'flight' || preDeathMode === 'dead';
+  if (preDeathMode !== 'flight' && preDeathMode !== 'dead') {
+    check('respawn check starts from flight or death', false, preDeathMode);
+    ready = false;
+  }
+  if (preDeathMode === 'dead' && !await launchIfDead()) {
+    check('respawn check starts from flight or death', false, 'stuck dead');
+    ready = false;
+  }
+  let respawnBefore = -1;
+  let reachedDead = false;
+  if (ready) {
+    respawnBefore = await page.evaluate(
+      () => window.__ELITE_GAME__.renderer.scene.children.length);
+    // Ram the station until dead: shields down, a sliver of hull, parked
+    // inside the hull with no grace and no impact cooldown. Re-parked every
+    // second in case a bounce carried the wreck clear.
+    for (let i = 0; i < 20; i++) {
+      reachedDead = await page.evaluate(() => {
+        const g = window.__ELITE_GAME__;
+        if (g.mode === 'dead') return true;
+        if (g.mode !== 'flight') return false;
+        g.player.shields = 0;
+        g.player.hull = 1;
+        const st = g.session.scene.station;
+        const f = g.session.flight;
+        f.pos.x = st.position.x + 120; f.pos.y = st.position.y; f.pos.z = st.position.z;
+        f.vel.x = 0; f.vel.y = 0; f.vel.z = 0;
+        g.session.grace = 0;
+        g.session.impactCooldown = 0;
+        return false;
+      });
+      if (reachedDead) break;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  check('a deliberate ram kills the ship', reachedDead,
+    'mode after ramming: ' + await page.evaluate(() => window.__ELITE_GAME__.mode));
+  const relaunched = reachedDead && await launchIfDead();
+  const respawn = await page.evaluate(() => ({
+    mode: window.__ELITE_GAME__.mode,
+    after: window.__ELITE_GAME__.renderer.scene.children.length,
+  }));
+  check('death respawns into flight', relaunched && respawn.mode === 'flight',
+    respawn.mode);
+  check('a respawn does not abandon the old system in the scene',
+    relaunched && respawn.after <= respawnBefore + 6,
+    respawnBefore + ' -> ' + respawn.after + ' children');
 
   // --- Long run -----------------------------------------------------------
   // Two thousand frames: enough to catch a leak, a NaN, or a mode that falls

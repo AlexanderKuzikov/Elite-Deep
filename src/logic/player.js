@@ -489,18 +489,72 @@ function validateSave(d, options) {
   var factions = opts.factions || [];
   var equipment = opts.equipment || [];
 
+  // --- Keys that must never come from a save --------------------------------
+  // `JSON.parse` keeps `__proto__` as an *own* key, and `Object.assign` below
+  // feeds it through the prototype setter - a save carrying one is a
+  // prototype-pollution sink. These are rejected unconditionally, before any
+  // merge and regardless of whether a vocabulary was passed.
+  function hasDangerousKey(obj) {
+    if (!obj || typeof obj !== 'object') return false;
+    return Object.keys(obj).some(function (k) {
+      return k === '__proto__' || k === 'constructor' || k === 'prototype';
+    });
+  }
+  var guarded = ['cargo', 'equip', 'standing', 'wanted', 'visited',
+    'systemMemory', 'costBasis'];
+  for (var g = 0; g < guarded.length; g += 1) {
+    if (hasDangerousKey(d[guarded[g]])) {
+      reasons.push(guarded[g] + ' carries a prototype key');
+    }
+  }
+
   // --- The fields the rest of the game does arithmetic on ------------------
   // Anything that reaches a screen as a number has to *be* a number, or the
   // screen renders "NaN" or throws. These are the ones with no safe fallback,
-  // because a wrong value is worse than a rejected save.
-  var numeric = ['cash', 'day', 'fuel', 'hull', 'shields', 'missiles', 'kills'];
+  // because a wrong value is worse than a rejected save. Counts and days are
+  // also floored at zero: a negative purse, hull or day is not a state the
+  // game can ever produce, only a hand-edited one.
+  var numeric = ['cash', 'day', 'fuel', 'fuelMax', 'hull', 'hullMax',
+    'shields', 'shieldMax', 'missiles', 'kills', 'activity',
+    'offences', 'bountyPending'];
   for (var i = 0; i < numeric.length; i += 1) {
     var key = numeric[i];
+    if (d[key] === undefined && (key === 'activity' || key === 'offences'
+      || key === 'bountyPending')) continue;   // newer counters, old saves lack them
     if (typeof d[key] !== 'number' || !isFinite(d[key])) {
       reasons.push(key + ' is not a finite number');
+    } else if (d[key] < 0) {
+      reasons.push(key + ' is negative');
     }
   }
-  if (d.cash < 0) reasons.push('cash is negative');
+  // A zero or negative maximum is not a ship, it is a division waiting to
+  // happen: widths, fractions and refuel math all divide by these.
+  var positive = ['fuelMax', 'hullMax', 'shieldMax'];
+  for (var pz = 0; pz < positive.length; pz += 1) {
+    var pk = positive[pz];
+    if (typeof d[pk] === 'number' && isFinite(d[pk]) && d[pk] <= 0) {
+      reasons.push(pk + ' is not positive');
+    }
+  }
+  var whole = ['day', 'missiles', 'kills', 'offences'];
+  for (var w = 0; w < whole.length; w += 1) {
+    var wk = whole[w];
+    if (typeof d[wk] === 'number' && isFinite(d[wk]) && d[wk] % 1 !== 0) {
+      reasons.push(wk + ' is not whole');
+    }
+  }
+  if (typeof d.name !== 'undefined' && typeof d.name !== 'string') {
+    reasons.push('name is not a string');
+  }
+  // `laserType` and `legalStatus` are read as keys and labels. An unknown
+  // string would not throw where it lands, but it means the save is not the
+  // shape this game writes.
+  if (d.laserType !== undefined && typeof d.laserType !== 'string') {
+    reasons.push('laserType is not a string');
+  }
+  if (d.legalStatus !== undefined && typeof d.legalStatus !== 'string') {
+    reasons.push('legalStatus is not a string');
+  }
 
   // --- The system the commander is standing in -----------------------------
   // This is the one that throws rather than draws badly: `enterSystem` reads
@@ -579,6 +633,37 @@ function validateSave(d, options) {
     }
   }
 
+  // --- Wanted, visited, memory, cost basis --------------------------------
+  // These ride along untouched by any screen, but a wrong shape still breaks
+  // the game: `visited` is counted, `wanted` is decayed by key, memory deltas
+  // feed prices and danger. Checked lightly - plain objects, finite numeric
+  // values, known keys where a vocabulary exists - because a deep audit of
+  // every memory event is not worth the code.
+  var maps = ['wanted', 'visited', 'systemMemory', 'costBasis'];
+  for (var m = 0; m < maps.length; m += 1) {
+    var mk = maps[m];
+    if (d[mk] === undefined || d[mk] === null) continue;
+    if (typeof d[mk] !== 'object' || Array.isArray(d[mk])) {
+      reasons.push(mk + ' is not an object');
+      continue;
+    }
+    var mkeys = Object.keys(d[mk]);
+    for (var q = 0; q < mkeys.length; q += 1) {
+      var mv = d[mk][mkeys[q]];
+      if (typeof mv !== 'number' || !isFinite(mv)) {
+        reasons.push(mk + ' of ' + mkeys[q] + ' is not a finite number');
+      }
+    }
+  }
+  if (commodities.length && d.costBasis && typeof d.costBasis === 'object') {
+    var bkeys = Object.keys(d.costBasis);
+    for (var b = 0; b < bkeys.length; b += 1) {
+      if (commodities.indexOf(bkeys[b]) < 0) {
+        reasons.push('cost basis names unknown commodity ' + bkeys[b]);
+      }
+    }
+  }
+
   // --- Contracts ----------------------------------------------------------
   if (d.contracts !== undefined && d.contracts !== null) {
     if (!Array.isArray(d.contracts)) {
@@ -590,6 +675,20 @@ function validateSave(d, options) {
           reasons.push('contract ' + k + ' is not an object');
         } else if (typeof con.deadlineDay !== 'number' || !isFinite(con.deadlineDay)) {
           reasons.push('contract ' + k + ' has no usable deadline');
+        } else {
+          if (systems > 0 && (typeof con.targetIndex !== 'number'
+            || con.targetIndex % 1 !== 0
+            || con.targetIndex < 0 || con.targetIndex >= systems)) {
+            reasons.push('contract ' + k + ' names no system');
+          }
+          if (con.tons !== undefined
+            && (typeof con.tons !== 'number' || !isFinite(con.tons) || con.tons < 0)) {
+            reasons.push('contract ' + k + ' has no usable tonnage');
+          }
+          if (con.commodity !== undefined && con.commodity !== null
+            && commodities.length && commodities.indexOf(con.commodity) < 0) {
+            reasons.push('contract ' + k + ' names an unknown commodity');
+          }
         }
       }
     }

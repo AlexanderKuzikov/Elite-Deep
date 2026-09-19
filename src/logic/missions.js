@@ -217,7 +217,12 @@ export function generateBoard(system, galaxy, player, seed, day) {
     const floor = Math.min(minTons, ceiling);
     const top = Math.max(floor, ceiling);
     const tons = Math.max(1, Math.round(floor + rand() * (top - floor)));
-    const days = pickDays(rand, relief ? 'relief' : 'delivery');
+    // The deadline is raised to fit the route, never lowered - the same rule
+    // the courier already follows below. A six-hop run with six days arrives
+    // on the last day with no day left to dock, so the floor is hops plus the
+    // far-end dock. Without this the job is flyable only by luck of the draw.
+    const drawn = pickDays(rand, relief ? 'relief' : 'delivery');
+    const days = Math.max(drawn, Math.ceil(pick.hops * MISSION.daysPerHop) + 1);
 
     offers.push(makeOffer({
       type: relief ? 'relief' : 'delivery',
@@ -267,8 +272,11 @@ export function generateBoard(system, galaxy, player, seed, day) {
   }
 
   // --- Bounty -------------------------------------------------------------
-  // Only a lawful system bothers to post one, and only where there is something
-  // to clear. The slot for it was held back above.
+  // A cleanup job is posted where there is something to clear. Note what this
+  // does *not* check: lawfulness. An anarchy with danger over the bar posts
+  // like anyone else, so "who pays for order where there is none" is an open
+  // balance question (see the bounty-reward problem), not a settled rule.
+  // The slot for it was held back above.
   if (bountyAvailable) {
     const [minCount, maxCount] = MISSION.bountyCount;
     const count = Math.round(minCount + rand() * (maxCount - minCount));

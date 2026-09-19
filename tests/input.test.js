@@ -502,6 +502,25 @@ test('one refusal does not kill the mouse for the session', () => {
   assert.equal(win.lockRequests, before + 1, 'the retry was not actually sent');
 });
 
+test('one gesture counts one refusal, not two', async () => {
+  // Chrome both rejects the request promise and fires `pointerlockerror` for
+  // the same gesture. Counting both scored a single refusal as two and halved
+  // the patience the threshold promises.
+  const win = fakeWindow();
+  win.requestPointerLock = function () {
+    this.lockRequests += 1;
+    return Promise.reject(new Error('no gesture'));
+  };
+  const doc = fakeDocument(win);
+  const state = withDocumentOn(doc, () => I.createInput(win, { pointerTarget: win }));
+
+  I.requestMouse(state);
+  doc.fire('pointerlockerror');
+  await new Promise((r) => setImmediate(r));
+  assert.equal(state.lockFailures, 1, 'one gesture scored twice');
+  assert.equal(I.lockRefused(state), false);
+});
+
 test('the game gives up only after repeated refusals', () => {
   const win = fakeWindow();
   const doc = fakeDocument(win);

@@ -108,8 +108,12 @@
  *     time and completion is assumed. A real commander can lose the fight, and
  *     the flight there costs more than a jump does. So bounty income here is an
  *     upper bound on itself.
- *   - **Death, crime, reputation.** Nothing shoots back, nothing goes wrong.
- *   - **The market reacting to the trader.** Prices are read, never moved.
+  *   - **Death, crime, reputation.** Nothing shoots back, nothing goes wrong.
+  *   - **The market reacting to the trader.** Prices are read, never moved.
+  *   - **Skipping ports.** Every hop ends in a dock here (sell, refuel, buy),
+  *     so a moving hop costs two days, jump plus dock. A player who chains
+  *     hops on one tank flies cheaper - deadlines feel one day tighter here
+  *     than in the game for multi-hop runs without refuel stops.
  *
  * Run: node scripts/economy-sim.mjs [jumps]
  */
@@ -242,17 +246,16 @@ function runCareer(jumps, jobs, prefer) {
   let clearing = null;      // { target, tons, daysLeft }
 
   /**
-   * Bank a day, the way the game does: `player.day += 1`, then the contract
-   * sweep runs against the *new* day.
+   * Bank a dock-day, the way the game does: the contract sweep runs against
+   * the day the ship arrived on, *then* the day advances.
    *
    * The order matters and it is the game's order. `dock()` resolves contracts
-   * with the day it arrived on, *then* advances - so a deadline is inclusive.
-   * Doing it the other way round would mark a job late on the very day the
-   * commander delivered it.
+   * with the day it arrived on and only afterwards calls `decayDay` - so a
+   * deadline is inclusive of the delivery day. Resolving after the advance
+   * would mark a job late on the very day the commander delivered it.
    */
   function dockAndAdvance() {
-    day += 1;
-    if (!jobs) return [];
+    if (!jobs) { day += 1; return []; }
     const missed = [];
     for (const outcome of M.resolveArrival(player, system.index, day)) {
       if (outcome.ok) {
@@ -267,7 +270,18 @@ function runCareer(jumps, jobs, prefer) {
       incomeContracts += outcome.reward;
       tally.bounty += 1;
     }
+    day += 1;
     return missed;
+  }
+
+  /**
+   * Bank a jump-day. A jump is not a dock: no contracts are handed in or
+   * lapsed mid-transit, the day just passes. Every moving hop below therefore
+   * costs two days - the jump and the dock at the far end - exactly like the
+   * game, which fires `decayDay` from both `completeJump` and `dock`.
+   */
+  function advanceJumpDay() {
+    day += 1;
   }
 
   for (let jump = 0; jump < jumps; jump += 1) {
@@ -334,9 +348,11 @@ function runCareer(jumps, jobs, prefer) {
         target = bountyJob.targetIndex;
       } else {
         // Empty-handed: take the best job that can actually be delivered.
+        // A run needs its hops plus the dock at the far end - the same +1 the
+        // board guarantees - so the filter matches the rule, not the raw days.
         const board = M.generateBoard(system, galaxy, player, boardSeed(system.index, day), day);
         const feasible = board
-          .filter((o) => hopsBetween(system, o.targetIndex, player.fuelMax) <= o.days)
+          .filter((o) => hopsBetween(system, o.targetIndex, player.fuelMax) + 1 <= o.days)
           .sort((a, b) => b.reward - a.reward);
         // `prefer` exists to check the instrument: if cargo jobs never complete
         // when they are chosen *first*, the cargo path in this sim is broken
@@ -440,8 +456,9 @@ function runCareer(jumps, jobs, prefer) {
 
     if (!hop) {
       // Nothing worth carrying and nowhere to be: sit out the day and look
-      // again. A day spent waiting is a dock - see "The day model" above.
-      day += 1;
+      // again. A day spent waiting is a dock - it can lapse a contract, so it
+      // goes through the same sweep rather than a bare increment.
+      dockAndAdvance();
       curve.push({ jump, day, cash: player.cash, system: system.name, note: 'no run' });
       continue;
     }
@@ -449,11 +466,13 @@ function runCareer(jumps, jobs, prefer) {
     player.fuel = Math.max(0, player.fuel - hop.ly);
     system = hop.system;
     // **The jump costs a day, and so does the dock at the far end.** In the
-    // game `decayDay` fires from `completeJump` and from `dock`, so a run of N
-    // hops arrives on day N and hands the job in on day N+1. `MISSION.days` was
-    // sized against "one dock at the end" alone, which is why long runs looked
-    // impossible: the deadline assumed a journey the ship cannot actually make
-    // in that many days.
+    // game `decayDay` fires from `completeJump` and from `dock`, and this loop
+    // docks every hop (it sells, refuels and buys at every port), so a moving
+    // hop costs two days here, exactly as it does there. A player who skips
+    // ports flies cheaper than this - the sim is pessimistic on purpose, and
+    // `MISSION.days` was sized against "one dock at the end" alone, which is
+    // why long runs looked impossible before the board learned the same rule.
+    advanceJumpDay();
     dockAndAdvance();
 
     curve.push({ jump, day, cash: Math.round(player.cash), system: system.name });

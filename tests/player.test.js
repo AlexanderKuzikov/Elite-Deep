@@ -237,7 +237,7 @@ function goodSave(over) {
   p.cargo = { food: 3 };
   p.equip = { scoop: true };
   p.standing = { EMPIRE: -12 };
-  p.contracts = [{ deadlineDay: 40, type: 'delivery' }];
+  p.contracts = [{ deadlineDay: 40, type: 'delivery', targetIndex: 3 }];
   const raw = JSON.parse(P.serialize(p));
   return Object.assign(raw, over || {});
 }
@@ -320,6 +320,44 @@ test('a save naming a faction that does not exist is rejected', () => {
   const v = P.validateSave(goodSave({ standing: { KLINGON: 5 } }), VOCAB);
   assert.equal(v.ok, false, 'unknown faction was accepted');
   assert.match(v.reason, /KLINGON/);
+});
+
+test('a save carrying a prototype key is rejected', () => {
+  // `JSON.parse` keeps `__proto__` as an own key, and the loader merges with
+  // `Object.assign` - which feeds it through the prototype setter. A save
+  // carrying one is a pollution sink, whatever its other fields say.
+  const bad = goodSave();
+  bad.cargo = JSON.parse('{"__proto__":{"polluted":true}}');
+  const v = P.validateSave(bad, VOCAB);
+  assert.equal(v.ok, false, 'a prototype key was accepted');
+  assert.match(v.reason, /prototype/);
+});
+
+test('negative counts and dead maxima are rejected', () => {
+  assert.equal(P.validateSave(goodSave({ fuel: -1 }), VOCAB).ok, false,
+    'negative fuel was accepted');
+  assert.equal(P.validateSave(goodSave({ fuelMax: 0 }), VOCAB).ok, false,
+    'a zero tank was accepted');
+  assert.equal(P.validateSave(goodSave({ fuelMax: 'lots' }), VOCAB).ok, false,
+    'a string tank was accepted');
+  assert.equal(P.validateSave(goodSave({ day: 2.5 }), VOCAB).ok, false,
+    'a fractional day was accepted');
+  assert.equal(P.validateSave(goodSave({ laserType: 7 }), VOCAB).ok, false,
+    'a numeric laser was accepted');
+});
+
+test('a contract naming no system or a phantom commodity is rejected', () => {
+  assert.equal(
+    P.validateSave(goodSave({ contracts: [{ deadlineDay: 40, targetIndex: 99 }] }), VOCAB).ok,
+    false, 'an off-chart target was accepted');
+  assert.equal(
+    P.validateSave(goodSave({
+      contracts: [{ deadlineDay: 40, targetIndex: 3, commodity: 'unobtainium', tons: 2 }],
+    }), VOCAB).ok,
+    false, 'a phantom commodity was accepted');
+  assert.equal(
+    P.validateSave(goodSave({ contracts: [{ deadlineDay: 40, targetIndex: 3 }] }), VOCAB).ok,
+    true, 'a clean contract was rejected');
 });
 
 test('a contract with no usable deadline is rejected', () => {

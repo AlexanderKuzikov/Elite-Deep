@@ -13,7 +13,10 @@
  *      station (0,0,0)          <- you always arrive here
  *      planet  (~1800 out)      <- a big sphere, mostly scenery to fly past
  *      star    (~9000 out)      <- pure backdrop; you cannot reach it
- *      asteroid belt (2200-3400) <- mining and cover
+  *      asteroid belt (2200-3400) <- cover; solid, ramming one hurts.
+  *                                     (Ore can be assayed but not mined:
+  *                                      rocks carry cargo and hp, but no shot
+  *                                      of the player's can reach them yet.)
  *      wormhole / sun glare     <- hazard zone, hostile traffic
  *
  * Traffic spawns procedurally in a shell around the station and despawns when
@@ -861,6 +864,15 @@ export function createTraffic(scene, system, seed, options) {
       if (typeof entity.speed !== 'number') entity.speed = 0;
       if (typeof entity.turnRate !== 'number') entity.turnRate = 0;
       if (!entity.velocity) entity.velocity = { x: 0, y: 0, z: 0 };
+      // The rest of what the step reads is guarded by short-circuit today
+      // (`missiles > 0`, `state === 'engage'`, the waypoint branch), but
+      // "false because NaN" is one refactor away from "NaN because refactor".
+      // A drifting wreck neither shoots nor launches nor patrols, stated
+      // plainly rather than implied by missing fields.
+      if (typeof entity.missiles !== 'number') entity.missiles = 0;
+      if (typeof entity.missileCooldown !== 'number') entity.missileCooldown = 0;
+      if (typeof entity.canFire !== 'number') entity.canFire = Infinity;
+      if (typeof entity.wanderTimer !== 'number') entity.wanderTimer = 6;
       ships.push(entity);
       added.push(entity);
     }

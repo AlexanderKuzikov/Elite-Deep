@@ -192,6 +192,14 @@ test('a canister carries every field the simulation step reads', () => {
     assert.ok(can.velocity, 'no velocity');
     assert.ok(can.spin, 'no spin, so it would not turn');
     assert.equal(typeof can.radius, 'number', 'no radius, so nothing can hit it');
+    // Everything else the step decrements or compares. Each is guarded by
+    // short-circuit today (`missiles > 0`, `state === 'engage'`), but a field
+    // that is only safe because nobody reads it yet is a NaN waiting for the
+    // next reader.
+    assert.equal(typeof can.missiles, 'number', 'no magazine count');
+    assert.equal(typeof can.missileCooldown, 'number', 'no missile cooldown');
+    assert.equal(typeof can.canFire, 'number', 'no gun cooldown');
+    assert.equal(typeof can.wanderTimer, 'number', 'no wander timer');
   }
 
   const before = added.map((c) => ({ ...c.mesh.position }));
