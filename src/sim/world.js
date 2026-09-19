@@ -24,7 +24,7 @@ import * as THREE from 'three';
 import * as R from '../logic/rng.js';
 import * as F from '../logic/factions.js';
 import * as C from '../logic/combat.js';
-import { makeShip, makeCoriolis, makeAsteroid, makeCanister, makeCapsule, EDGE_COLOUR, FLAME } from './models.js';
+import { makeShip, makeCoriolis, makeAsteroid, makeCanister, makeCapsule, FLAME } from './models.js';
 import { disposeTree } from './dispose.js';
 
 /** How far out things sit. All in world units. */
