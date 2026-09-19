@@ -329,3 +329,4 @@ Elite-Deep/
 ├── docs/                # CONTEXT.md, DECISIONS.md
 └── e2e-shots/           # Скриншоты (перезаписываются прогоном e2e)
 ```
+
