@@ -130,6 +130,17 @@ export const MOUSE = {
    * politeness; it is the only thing that works.
    */
   relockDelay: 1.4,
+  /**
+   * How many refusals in a row before the game stops asking for the pointer.
+   *
+   * Deliberately more than one. A single refusal is the normal answer to a
+   * request that arrived without a gesture behind it - a click that landed a
+   * frame too early, a re-lock inside Chrome's post-Escape ban - and the next
+   * honest gesture usually succeeds. Giving up at the first one is what used to
+   * cost the player the mouse for the rest of the session; never giving up
+   * would mean a `pointerlockerror` on every click forever.
+   */
+  giveUpAfter: 3,
 };
 
 /**
@@ -179,10 +190,21 @@ export function createInput(target, options) {
     pending: [],
     // Set while the browser tab is hidden: everything releases.
     blurred: false,
-    // Set by `addPointerLock` when the browser refuses a lock. A refusal is
-    // normal (it is what happens on a trackpad-heavy machine where the user
-    // cancelled a prompt) and must not be retried in a loop.
-    lockFailed: false,
+    /**
+     * How many refusals in a row the browser has handed back.
+     *
+     * A refusal is normal - it is what a request without a gesture gets, and
+     * what a re-lock inside Chrome's own post-Escape ban gets - so it must not
+     * be retried every frame. It must not be permanent either, which is the
+     * trap this counter exists to avoid: with a plain boolean, one refusal
+     * (from a click that missed, or a promise rejected for reasons the player
+     * never saw) left the mouse dead for the rest of the session, and no later
+     * gesture could revive it.
+     *
+     * After `MOUSE.giveUpAfter` refusals the game stops asking and says so on
+     * screen. Anything less and the next gesture tries again.
+     */
+    lockFailures: 0,
     el,
     mouseEnabled: opts.mouse !== false,
     invertPitch: !!opts.invertPitch,
@@ -242,6 +264,10 @@ export function createInput(target, options) {
       state.mouse.y = 0;
       state.mouseTarget.x = 0;
       state.mouseTarget.y = 0;
+      // A lock that came back is proof the browser will grant one. Whatever
+      // refusals were counted before are stale, and keeping them would leave
+      // the mouse dead for the session after a single unlucky request.
+      state.lockFailures = 0;
     } else {
       // Losing the lock - Escape, alt-tab, or the browser deciding - must
       // centre the stick. Otherwise the ship keeps the last deflection and
@@ -249,15 +275,23 @@ export function createInput(target, options) {
       // something.
       state.mouseTarget.x = 0;
       state.mouseTarget.y = 0;
+      // Every loss arms the cooldown, not just the programmatic one. Escape is
+      // a *browser* release, so it never passes through `releaseMouse` - and
+      // without this the next click asks for the pointer immediately, which
+      // Chrome refuses (it keeps its own second-long ban after a user exit).
+      // That refusal is what used to kill the mouse for the rest of the
+      // session. `releaseMouse` sets the same value; setting it twice is the
+      // same as setting it once.
+      state.relockIn = Math.max(state.relockIn, MOUSE.relockDelay);
     }
     notifyLock(state);
   }
 
   function onPointerLockError() {
-    // The browser refused. Record it so the session stops insisting on the
-    // lock and can say so on screen, rather than silently doing nothing every
-    // time the player clicks.
-    state.lockFailed = true;
+    // The browser refused. Count it so the session stops insisting on the lock
+    // after a few tries and can say so on screen, rather than silently doing
+    // nothing every time the player clicks.
+    state.lockFailures += 1;
     state.pointerLocked = false;
     notifyLock(state);
   }
@@ -396,6 +430,19 @@ function releaseStick(state, dt) {
 }
 
 /**
+ * The frame's delta time, for callers that have no `dt` of their own.
+ *
+ * `axes` is where `lastDt` comes from, and `axes` is only called while flying.
+ * Everything the frame clock drives has to survive that: a cooldown measured
+ * against a clock that stops advancing outside flight is not a cooldown, it is
+ * a stuck timer. The default covers the first frame, before any `axes` call.
+ */
+export function frameDelta(state, dt) {
+  if (typeof dt === 'number' && isFinite(dt) && dt > 0) state.lastDt = dt;
+  return state.lastDt || 1 / 60;
+}
+
+/**
  * Integrate the virtual stick for this frame and return it.
  *
  * A joystick is not a control that stays where you leave it, and a mouse has no
@@ -421,11 +468,14 @@ function clamp(v, lo, hi) {
 }
 
 /** Clear the one-shot queue. Call at the end of each frame. */
-export function endFrame(state) {
+export function endFrame(state, dt) {
   state.pending.length = 0;
   // The re-lock cooldown rides the frame clock rather than a wall clock, so it
   // works the same in the browser and under a test that steps time by hand.
-  tickMouse(state, state.lastDt || 1 / 60);
+  // The frame's own `dt` is preferred here, because `lastDt` is only refreshed
+  // by `axes` and `axes` only runs while flying - a cooldown that is armed by
+  // releasing the mouse outside flight would never come back down.
+  tickMouse(state, frameDelta(state, dt));
 }
 
 /**
@@ -438,7 +488,12 @@ export function endFrame(state) {
  */
 export function requestMouse(state) {
   if (!state.mouseEnabled) return false;
-  if (state.pointerLocked || state.lockFailed) return false;
+  if (state.pointerLocked) return false;
+  // Only after several refusals in a row does the game stop asking. One
+  // refusal is not evidence that the browser will never grant a lock - it is
+  // usually a click that arrived a moment too early - and treating it as
+  // permanent is how the mouse used to die for the session.
+  if (state.lockFailures >= MOUSE.giveUpAfter) return false;
   if (state.relockIn > 0) return false;
   const target = state.pointerTarget;
   if (!target || typeof target.requestPointerLock !== 'function') return false;
@@ -451,14 +506,21 @@ export function requestMouse(state) {
     // Chrome returns a promise here and rejects it when the request is not
     // backed by a gesture; older browsers return nothing. Either way a failure
     // must not surface as an unhandled rejection, so it is swallowed and the
-    // refusal is recorded instead.
+    // refusal is counted instead.
     const asked = target.requestPointerLock();
-    if (asked && typeof asked.catch === 'function') asked.catch(() => { state.lockFailed = true; });
+    if (asked && typeof asked.catch === 'function') {
+      asked.catch(() => { state.lockFailures += 1; });
+    }
   } catch (err) {
-    state.lockFailed = true;
+    state.lockFailures += 1;
     return false;
   }
   return true;
+}
+
+/** True once the browser has refused the pointer often enough to give up. */
+export function lockRefused(state) {
+  return state.lockFailures >= MOUSE.giveUpAfter;
 }
 
 /**
@@ -467,6 +529,12 @@ export function requestMouse(state) {
  * The delay is the whole point. Escape is how a player gets their cursor back
  * to click something else, and a lock that is re-acquired on the next frame
  * makes Escape look broken.
+ *
+ * The same cooldown is armed by `onPointerLockChange` when the lock is lost
+ * without going through here - Escape is a browser release and never calls
+ * this function. Setting it here as well means a caller that releases the
+ * pointer in an environment where no change event follows (a test, or a
+ * browser that stays silent) still gets the delay.
  */
 export function releaseMouse(state) {
   if (typeof document !== 'undefined' && document.exitPointerLock) {
@@ -506,6 +574,6 @@ export function mouseActive(state) {
 
 export default {
   BINDINGS, MOUSE,
-  createInput, destroyInput, held, consume, axes, endFrame,
-  requestMouse, releaseMouse, addPointerLock, tickMouse, mouseActive,
+  createInput, destroyInput, held, consume, axes, endFrame, frameDelta,
+  requestMouse, releaseMouse, addPointerLock, tickMouse, mouseActive, lockRefused,
 };

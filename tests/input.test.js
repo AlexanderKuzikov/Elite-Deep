@@ -484,19 +484,53 @@ test('a second request while already captured is not sent', () => {
   assert.equal(win.lockRequests, before, 'a redundant lock request was sent');
 });
 
-test('a refused lock is not requested again', () => {
-  // Chrome refuses when the request has no gesture behind it. Retrying every
-  // frame would be a `pointerlockerror` per frame and a console full of noise.
+test('one refusal does not kill the mouse for the session', () => {
+  // The old behaviour made a single refusal permanent, and that was the bug:
+  // a click that landed a frame too early cost the player the mouse until they
+  // reloaded the page. A refusal is counted, not carved in stone.
   const win = fakeWindow();
   const doc = fakeDocument(win);
   const state = withDocumentOn(doc, () => I.createInput(win, { pointerTarget: win }));
 
   assert.equal(I.requestMouse(state), true);
   doc.fire('pointerlockerror');
-  assert.equal(state.lockFailed, true, 'the refusal was not recorded');
-  const after = win.lockRequests;
-  assert.equal(I.requestMouse(state), false, 'the game asked again after being refused');
-  assert.equal(win.lockRequests, after);
+  assert.equal(state.lockFailures, 1, 'the refusal was not counted');
+  assert.equal(I.lockRefused(state), false, 'one refusal was treated as permanent');
+
+  const before = win.lockRequests;
+  assert.equal(I.requestMouse(state), true, 'the next honest gesture was refused');
+  assert.equal(win.lockRequests, before + 1, 'the retry was not actually sent');
+});
+
+test('the game gives up only after repeated refusals', () => {
+  const win = fakeWindow();
+  const doc = fakeDocument(win);
+  const state = withDocumentOn(doc, () => I.createInput(win, { pointerTarget: win }));
+
+  for (let i = 0; i < I.MOUSE.giveUpAfter; i += 1) {
+    I.requestMouse(state);
+    doc.fire('pointerlockerror');
+  }
+  assert.equal(I.lockRefused(state), true, 'the game never gave up');
+  const before = win.lockRequests;
+  assert.equal(I.requestMouse(state), false, 'the game kept asking after giving up');
+  assert.equal(win.lockRequests, before, 'a request was sent after giving up');
+});
+
+test('a lock that comes back clears the refusal count', () => {
+  // The counter is a run of failures, not a lifetime tally: the browser
+  // granting a lock is proof the next one can be granted too.
+  const win = fakeWindow();
+  const doc = fakeDocument(win);
+  const state = withDocumentOn(doc, () => I.createInput(win, { pointerTarget: win }));
+
+  I.requestMouse(state);
+  doc.fire('pointerlockerror');
+  assert.equal(state.lockFailures, 1);
+
+  withDocumentOn(doc, () => doc.grant(win));
+  assert.equal(state.lockFailures, 0, 'a granted lock left the count standing');
+  assert.equal(I.lockRefused(state), false);
 });
 
 test('the host is told when the pointer is captured and released', () => {
@@ -539,6 +573,54 @@ test('Escape cannot be re-captured on the next frame', () => {
   assert.equal(state.relockIn, 0, 'the cooldown never expired');
   assert.equal(I.requestMouse(state), true, 'the lock could not be taken back at all');
   void win;
+});
+
+test('the browser taking the pointer back arms the same cooldown', () => {
+  // This is the defect the review found, and it is worth stating plainly: only
+  // the *programmatic* release armed the cooldown, so a browser release -
+  // Escape, which is the one the player is told to use - went straight past it.
+  // The next click asked for the pointer immediately, Chrome refused (its own
+  // post-Escape ban lasts about a second), the refusal was permanent, and the
+  // mouse was dead until the page was reloaded.
+  const { doc, state } = capturedWindow();
+  assert.equal(I.mouseActive(state), true);
+
+  withDocumentOn(doc, () => doc.exitPointerLock());
+  assert.equal(I.mouseActive(state), false, 'the pointer was still locked');
+  assert.ok(state.relockIn > 0, 'a browser release armed no cooldown');
+  assert.equal(I.requestMouse(state), false, 'the pointer was taken back on the next frame');
+});
+
+test('a refusal after Escape is not fatal', () => {
+  // The whole chain: Escape, an impatient click, a browser refusal. The last
+  // step used to end the session's mouse control. Now it costs one attempt.
+  const { doc, win, state } = capturedWindow();
+  const before = win.lockRequests;
+  withDocumentOn(doc, () => doc.exitPointerLock());
+  doc.fire('pointerlockerror');
+  assert.equal(I.lockRefused(state), false, 'one refusal after Escape was treated as final');
+
+  // Wait out the cooldown; the next gesture must be able to work.
+  for (let i = 0; i < 120; i += 1) I.endFrame(state);
+  assert.equal(I.requestMouse(state), true, 'the mouse never came back after Escape');
+  assert.equal(win.lockRequests, before + 1, 'the request was not actually sent');
+});
+
+test('the cooldown comes down even when nobody is flying', () => {
+  // `lastDt` is refreshed by `axes`, and `axes` only runs while flying. So a
+  // cooldown that rode `lastDt` alone stopped dead the moment the player was
+  // docked, on the chart, or at the title - the exact places the pointer is
+  // released on purpose. Escape at the title left the timer stuck a shade above
+  // 1.4 s, so the next gesture was refused, and the retry after that was
+  // refused as well: the player's mouse never came back at all.
+  const { doc, state } = capturedWindow();
+  // No `axes` call anywhere in this test, which is the whole point.
+  withDocumentOn(doc, () => doc.exitPointerLock());
+  assert.ok(state.relockIn > 1, 'the release armed no cooldown to begin with');
+
+  // Two seconds of frames at 1/60, passed the way `main.js` passes it.
+  for (let i = 0; i < 120; i += 1) I.endFrame(state, 1 / 60);
+  assert.equal(state.relockIn, 0, 'the cooldown froze because no frame set `lastDt`');
 });
 
 test('mouseActive answers whether the mouse is really flying the ship', () => {

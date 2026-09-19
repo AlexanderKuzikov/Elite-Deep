@@ -275,6 +275,19 @@ export function boot(host, options) {
   const mouseUI = {
     captured: false,
     hintUntil: 0,
+    /**
+     * True between losing the pointer in flight and taking it back. Escape, and
+     * a browser that takes the lock away on its own, both land here.
+     *
+     * This exists because the pointer being *released* is a different event
+     * from the pointer never having been captured: the first is a player who
+     * just lost a control they were using and needs telling how to get it back
+     * indefinitely, the second is a player who has not tried yet and needs a
+     * nudge that expires. Timing the first one on the same clock as the second
+     * meant the instructions vanished 1.4 seconds after Escape - exactly when
+     * they were needed.
+     */
+    released: false,
     /** Reasons already explained to the player. Never explained twice. */
     saidManual: false,
     saidRefused: false,
@@ -284,8 +297,14 @@ export function boot(host, options) {
     mouseUI.captured = locked;
     if (locked) {
       // The player has the controls they asked for, so the instructions have
-      // done their job and go away.
+      // done their job and go away - including the "your pointer is free"
+      // notice, which is only true until the next capture.
       mouseUI.hintUntil = 0;
+      mouseUI.released = false;
+    } else if (session.mode === MODE.FLIGHT) {
+      // Lost while flying: the player is holding a keyboard and no mouse, and
+      // only a capture gets it back. The notice stays up until they do.
+      mouseUI.released = true;
     }
   });
 
@@ -326,8 +345,10 @@ export function boot(host, options) {
    * Put the mouse hint on screen for the first seconds of flight.
    *
    * Only for the case where flight began without a captured pointer. A pointer
-   * released *during* flight needs no timer: the hint stays until it is taken
-   * back, because the player has just lost a control they were using.
+   * released *during* flight needs no timer: `mouseUI.released` keeps the hint
+   * up until it is taken back, because the player has just lost a control they
+   * were using. Asserting that with a countdown from here would be wrong -
+   * `MOUSE_HINT_SECONDS` is a reading time, not a notice of loss.
    */
   function showMouseHint() {
     mouseUI.hintUntil = session.time + MOUSE_HINT_SECONDS;
@@ -537,6 +558,15 @@ export function boot(host, options) {
     }
     if (mode === MODE.DEAD) {
       INPUT.releaseMouse(input);
+    }
+    // The "your pointer is free" notice belongs to the flight view and to a
+    // player who is still flying. Leaving flight by any route - docking,
+    // dying, the title - clears it, so the next undock does not open with an
+    // instruction the player did not ask for.
+    if (mode !== MODE.FLIGHT) {
+      mouseUI.released = false;
+      mouseUI.hintUntil = 0;
+      mouseUI.captured = false;
     }
   }
 
@@ -2219,7 +2249,7 @@ export function boot(host, options) {
     audio.setEngine(session.mode === MODE.FLIGHT ? session.flight.throttle : 0,
       session.mode === MODE.FLIGHT ? !!session.flight.boost : false);
 
-    INPUT.endFrame(input);
+    INPUT.endFrame(input, dt);
   }
 
   function updateTitle() {
@@ -2518,20 +2548,27 @@ export function boot(host, options) {
    *
    * Three states, and it is worth being explicit about why there are three
    * rather than one. A player whose pointer is captured needs no instructions.
-   * A player who just pressed Escape needs telling, urgently and briefly, how to
-   * get it back. A player flying without ever having had it - a trackpad, a
-   * browser that refused, a click that missed - needs the same sentence but
-   * without the accusation that they lost something.
+   * A player who just lost the pointer - Escape, or the browser taking it back
+   * - needs telling, and needs it to *stay* until they act, because they are
+   * now holding a keyboard they did not choose. A player flying without ever
+   * having had it - a trackpad, a browser that refused, a click that missed -
+   * needs the same sentence but without the accusation that they lost
+   * something, and only for as long as it takes to read.
+   *
+   * The two cases are told apart by `mouseUI.released` rather than by the
+   * re-lock cooldown. The cooldown is 1.4 seconds long, and it is there to stop
+   * the game grabbing the pointer straight back - it says nothing about how
+   * long the player needs the instructions.
    */
   function drawMouseHint(ctx) {
     if (session.mode !== MODE.FLIGHT) return;
     if (INPUT.mouseActive(input)) return;
-    const held = input.relockIn > 0;
-    if (!held && session.time >= mouseUI.hintUntil) return;
+    const released = mouseUI.released;
+    if (!released && session.time >= mouseUI.hintUntil) return;
 
-    const text = input.lockFailed
+    const text = INPUT.lockRefused(input)
       ? HUD.MOUSE_HINT.refused
-      : (held ? HUD.MOUSE_HINT.manual : HUD.MOUSE_HINT.capture);
+      : (released ? HUD.MOUSE_HINT.manual : HUD.MOUSE_HINT.capture);
     const k = HUD.hudScale(hudH);
     ctx.save();
     ctx.textAlign = 'center';
@@ -2907,6 +2944,24 @@ export function boot(host, options) {
     strike(entity, damage) {
       onPlayerHit(entity, damage, { x: 0, y: 0, z: 0 });
       return !!(entity && entity.dead);
+    },
+
+    /**
+     * The element the pointer is locked to, and the input state behind it.
+     *
+     * A driver cannot otherwise tell a request that was refused from one that
+     * was never made, and those two failures need opposite fixes. Reading the
+     * game's own state is the only way to tell them apart.
+     */
+    debugPointer() {
+      return {
+        target: input.pointerTarget,
+        sameAs: (el) => el === input.pointerTarget,
+        lockFailures: input.lockFailures,
+        relockIn: input.relockIn,
+        locked: input.pointerLocked,
+        mouseEnabled: input.mouseEnabled,
+      };
     },
   };
 }
