@@ -61,10 +61,16 @@
  * instrument. Four separate defects, all of them in the measuring apparatus
  * rather than in the game:
  *
- *   1. **The clock.** This loop spent a day on every jump, while `MISSION.days`
- *      is sized for the game's model where a day is a *dock* and a jump costs no
- *      time at all (`decayDay` fires on `dock`). Deadlines meant for six docks
- *      expired after six jumps, so every multi-hop run was late by construction.
+ *   1. **The clock.** This loop spent a day on every jump, and that part was
+ *      *right* - in the game a jump does cost a day, because `decayDay` fires
+ *      from `completeJump` as well as from `dock`. What was wrong was the
+ *      model the numbers were read against: `MISSION.days` sizes a run as
+ *      "one dock at the far end" and leaves no allowance for days spent in
+ *      transit, so any multi-hop contract is late by construction once the
+ *      hops are charged. The fix belonged in the mission lengths and in
+ *      reading the table honestly, not in making jumps free. Earlier revisions
+ *      of this comment claimed the loop was wrong to charge a day per jump;
+ *      that was the actual error, and it was corrected in the game's favour.
  *   2. **Cleanups never started.** A bounty names the system it was posted in,
  *      so it needs no hop - the work is already here. The sim set the target and
  *      then fell through to the trade search, which found no neighbour that
@@ -442,11 +448,12 @@ function runCareer(jumps, jobs, prefer) {
 
     player.fuel = Math.max(0, player.fuel - hop.ly);
     system = hop.system;
-    // **The jump itself costs no time.** In the game `decayDay` fires on dock,
-    // and a hyperspace jump is instant - a commander can cross the galaxy in
-    // what the calendar calls no time at all. The sim used to charge a day per
-    // jump, which is what made every deadline look impossible: `MISSION.days`
-    // is sized for "six docks", and six docks is not six jumps.
+    // **The jump costs a day, and so does the dock at the far end.** In the
+    // game `decayDay` fires from `completeJump` and from `dock`, so a run of N
+    // hops arrives on day N and hands the job in on day N+1. `MISSION.days` was
+    // sized against "one dock at the end" alone, which is why long runs looked
+    // impossible: the deadline assumed a journey the ship cannot actually make
+    // in that many days.
     dockAndAdvance();
 
     curve.push({ jump, day, cash: Math.round(player.cash), system: system.name });

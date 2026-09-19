@@ -65,19 +65,21 @@ export const MISSION = {
    * graph entirely, so it was measuring a distance the ship cannot fly.
    *
    * Six jumps is the ceiling because a deadline is measured in days and a day
-   * is a dock: a run out and back costs two hops of the budget, so six hops
-   * still leaves room for the return trip on the longest deadlines.
+   * is spent by a jump as well as by a dock: a run out and back costs two hops
+   * of the budget, so six hops still leaves room for the return trip on the
+   * longest deadlines.
    */
   maxHops: 6,
   /** Days allowed, by type. A day passes on every dock and every jump. */
   days: { delivery: [7, 12], relief: [6, 10], courier: [4, 8], bounty: [6, 12] },
   /**
-   * Docks a single hop is worth when a deadline has to be raised to fit.
+   * Days a single hop is worth when a deadline has to be raised to fit.
    *
-   * One, because a dock is what advances the clock and a leg of the journey
-   * costs one. The `+ 1` at the call site is the dock at the far end, where the
-   * documents are actually handed over - a courier that arrives with no day
-   * left to dock has not delivered.
+   * One, because a jump spends a day (`decayDay` fires from `completeJump`).
+   * The `+ 1` at the call site is the dock at the far end, where the documents
+   * are actually handed over - a courier that arrives with no day left to dock
+   * has not delivered. So the shortest flyable route of N hops needs N + 1
+   * days, and a deadline that only covers the hops is a job lost in transit.
    */
   daysPerHop: 1,
   /** Tonnage on offer, by type, as a floor and a share of the hold. */
@@ -342,6 +344,24 @@ function isCrisis(system) {
 }
 
 /**
+ * The identity of an offer, and of the contract it becomes.
+ *
+ * Two things key on this: the board marks an offer `taken` by matching ids, and
+ * `accept` refuses an id it already holds. So it has to be unique per *job* -
+ * and until the commodity was added it was not. Type, route, deadline and
+ * tonnage were the whole story, so two different cargoes posted on the same
+ * route for the same tonnage and landing on the same day shared an id, and the
+ * duplicate guard refused the second as though it were the first.
+ *
+ * Courier and bounty carry no commodity (`null`), which leaves an empty final
+ * slot rather than changing their ids.
+ */
+export function offerId(spec) {
+  return spec.type + ':' + spec.system.index + ':' + spec.target.index + ':'
+    + (spec.day + spec.days) + ':' + spec.tons + ':' + (spec.commodity || '');
+}
+
+/**
  * Price one contract and package it.
  *
  * The reward is built from three terms so it stays meaningful across the whole
@@ -373,7 +393,8 @@ function makeOffer(spec) {
   const deadline = spec.day + spec.days;
 
   return {
-    id: spec.type + ':' + spec.system.index + ':' + spec.target.index + ':' + deadline + ':' + spec.tons,
+    // The commodity is part of the identity, not decoration: see `offerId`.
+    id: offerId(spec),
     type: spec.type,
     commodity: spec.commodity,
     commodityName: com ? com.name : null,
@@ -465,7 +486,11 @@ export function stakeOf(player, contract, market) {
   if (!contract.commodity || !market) return fine;
 
   const entry = shoppingList(player).find((e) => e.commodity === contract.commodity);
-  const tons = (entry && entry.short) || contract.tons;
+  // `||` would be wrong here: a full hold gives `short === 0`, which is falsy,
+  // so the fallback fired exactly when the answer was zero and valued the stake
+  // as though the whole tonnage were still to be bought. Only a *missing* entry
+  // (nothing to price) falls back to the contract's own tonnage.
+  const tons = entry ? entry.short : contract.tons;
   const row = market.find((r) => r && r.id === contract.commodity);
   const unit = (row && row.buyPrice) || 0;
   return fine + Math.round(unit * tons);
@@ -647,5 +672,5 @@ export function active(player) {
 export default {
   MISSION, generateBoard, describe, accept, resolveArrival, checkBounties,
   bountyProgress, bountyPressure, abandon, daysLeft, active,
-  shoppingList, stakeOf,
+  shoppingList, stakeOf, offerId,
 };

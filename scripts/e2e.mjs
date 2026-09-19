@@ -213,67 +213,102 @@ try {
   check('a flight frame rendered without throwing', shot0 !== null);
 
   // --- Mouse control ------------------------------------------------------
-  // The mouse runs on pointer lock, and pointer lock is the one thing a headless
-  // run cannot fake: the browser refuses a request that has no real gesture
-  // behind it, and `--headless` grants no gesture to a synthetic event. So what
-  // is checked here is the half that is checkable - the request is made, on the
-  // right element, from a real keypress - and the half that is not is stated in
-  // the check's name rather than quietly skipped.
-  const mouse = await page.evaluate(() => {
+  // The mouse runs on pointer lock. Headless cannot complete a lock - Chrome
+  // refuses a request with no real gesture behind it, and a synthetic keypress
+  // is not a gesture - but that is the browser's half of the contract, and the
+  // game's half is entirely checkable: when the player makes the launch
+  // gesture, the game must *ask* for the pointer, on an element that can hold
+  // it. Asking is what the game controls and what was broken twice over.
+  //
+  // The earlier version of this check asserted only that the canvas *has* a
+  // `requestPointerLock` and that the wrapper was not called on the wrong
+  // element. Both are true when no request is made at all, so a regression
+  // that stopped the game asking entirely would have passed. The count is
+  // asserted now, and the count is the whole value of the check.
+  //
+  // The gesture is driven through the *live frame loop*, not through `g.step`.
+  // That is not a stylistic choice: measured, the ask happens on the live
+  // loop's frame and not on a hand-stepped one. `g.step` bypasses the frame
+  // clock the mouse cooldown runs on, and the two were racing over the same
+  // buffered keypress - which is why this check reported zero requests in one
+  // run and one request in another, from identical code.
+  //
+  // The game is also already holding the pointer by this point in the suite,
+  // because an earlier block launched it. `requestMouse` is *correct* to
+  // return early then - a game that asked for a lock it already had would be
+  // the bug. So the pointer is given back first, exactly as Escape does, and
+  // its cooldown is waited out on the live clock.
+  await page.evaluate(() => {
     const g = window.__ELITE_GAME__;
     const canvas = document.getElementById('elite-world');
-    let asked = 0;
+    const w = window;
+    w.__mouseProbe = { asked: 0, wrongElement: false, canvasId: canvas.id };
     const realRequest = canvas.requestPointerLock;
-    let wrongElement = false;
     canvas.requestPointerLock = function () {
-      asked += 1;
-      // The element the request is made on. The defect being guarded against is
-      // a request that goes to the window, which cannot hold a lock at all.
-      if (this !== canvas) wrongElement = true;
+      w.__mouseProbe.asked += 1;
+      // The element the request is made on. The defect guarded against is a
+      // request that goes to the window, which cannot hold a lock at all.
+      if (this !== canvas) w.__mouseProbe.wrongElement = true;
       // The real call is made, but the refusal is swallowed: headless Chrome
       // grants no gesture to a synthetic keypress, so the promise would reject
-      // and take the page with it.
+      // and take the page with it. The refusal is still *counted* by the game,
+      // which is fine - the check is that the ask happened.
       try {
         const p = realRequest.apply(this, arguments);
         if (p && typeof p.catch === 'function') p.catch(() => {});
       } catch (err) { /* no gesture: expected in a headless run */ }
       return undefined;
     };
-
+  });
+  // Hand the pointer back the way Escape does, and let the cooldown expire on
+  // the live clock. `relockDelay` is 1.4 s; the margin below is for the loop.
+  const released = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    const st = g.releasePointer();
     g.setMode('title');
+    return { locked: st.locked, relockIn: st.relockIn };
+  });
+  await new Promise((r) => setTimeout(r, 2200));
+  await page.evaluate(() => {
     // A real keydown on the window: the title screen's launch key. This is the
     // whole point - the capture request has to be reachable from a gesture the
     // player actually makes, not only from a test-only code path.
     window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyM' }));
-    g.step(1 / 60, 9000, { render: false });
-
+  });
+  // Let the real frame loop notice and act, which is how a player launches.
+  await new Promise((r) => setTimeout(r, 600));
+  const mouse = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    const p = window.__mouseProbe;
     return {
       mode: g.mode,
-      asked: asked,
-      wrongElement: wrongElement,
-      canvasId: canvas.id,
-      // Whether the element the game locks can hold a lock at all. The window
-      // has no `requestPointerLock` in Chrome, which is exactly why the mouse
-      // was dead for so long: every request went to an object that could not
-      // answer it.
-      hasRequestApi: typeof canvas.requestPointerLock === 'function',
+      asked: p.asked,
+      wrongElement: p.wrongElement,
+      canvasId: p.canvasId,
+      hasRequestApi: typeof document.getElementById('elite-world').requestPointerLock === 'function',
       windowHasRequestApi: typeof window.requestPointerLock === 'function',
+      after: g.debugPointer ? JSON.parse(JSON.stringify({
+        locked: g.debugPointer().locked,
+        relockIn: g.debugPointer().relockIn,
+        lockFailures: g.debugPointer().lockFailures,
+      })) : null,
     };
   });
+  check('the pointer can be handed back, arming the cooldown a real Escape arms',
+    released.locked === false && released.relockIn > 0,
+    'locked=' + released.locked + ' relockIn=' + released.relockIn.toFixed(2));
   check('launching from the title begins flight', mouse.mode === 'flight', mouse.mode);
-  // The request count is not asserted, and that is deliberate: whether Chrome
-  // grants a gesture to a synthetic keypress is not something this test
-  // controls. What it can establish is that the request is aimed at an element
-  // that is *able* to hold a lock, and that it is not aimed at the window -
-  // which is the defect that kept the mouse dead.
+  check('the game asks for the pointer when the player launches',
+    mouse.asked > 0,
+    'asked=' + mouse.asked + '; state ' + JSON.stringify(mouse.after));
   check('the pointer is requested on an element that can hold it',
-    mouse.hasRequestApi === true && mouse.wrongElement === false,
+    mouse.asked > 0 && mouse.wrongElement === false && mouse.hasRequestApi === true,
     mouse.asked + ' request(s) on #' + mouse.canvasId
     + '; window.requestPointerLock is '
     + (mouse.windowHasRequestApi ? 'present' : 'absent'));
   // What headless cannot check is the lock itself: Chrome refuses a request with
   // no gesture behind it, and a synthetic keypress is not a gesture. So the
-  // handover is left alone rather than asserted, and the check above states
+  // handover is left alone rather than asserted, and the checks above state
   // exactly which half of it is covered.
   check('docking is the mutual-exclusion guard for the lock',
     await page.evaluate(() => {
@@ -282,6 +317,110 @@ try {
       return g.mode === 'docked';
     }),
     'the station screen gets the cursor back');
+
+  // --- A routine dock and undock must not leave a dead mouse --------------
+  // Docking releases the pointer to show the station screen, and the player
+  // pressed nothing to cause it. That release used to arm the same cooldown an
+  // Escape arms, so a commander who docked and launched again within a second
+  // and a half got a dead mouse and a hint telling them to click - the exact
+  // symptom of the bug the cooldown was added to fix, but with no Escape in the
+  // story. Measured here rather than argued.
+  const dockCycle = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    g.dock();
+    const afterDock = g.debugPointer();
+    g.undock();
+    const afterUndock = g.debugPointer();
+    return {
+      mode: g.mode,
+      relockAfterDock: afterDock.relockIn,
+      relockAfterUndock: afterUndock.relockIn,
+      lockedAfterDock: afterDock.locked,
+    };
+  });
+  check('docking releases the pointer for the station screen',
+    dockCycle.lockedAfterDock === false, 'locked=' + dockCycle.lockedAfterDock);
+  check('a routine dock-then-undock does not arm the player-facing cooldown',
+    dockCycle.relockAfterDock === 0 && dockCycle.relockAfterUndock === 0,
+    'relockIn after dock ' + dockCycle.relockAfterDock
+    + ', after undock ' + dockCycle.relockAfterUndock);
+
+  // --- System change drops what belonged to the old scene ------------------
+  // A jump throws away the whole system, so anything the player owns that
+  // pointed into it has to go too. Two things used to survive: the locked
+  // target (the HUD kept drawing a box around a mesh from a system the player
+  // had left) and the meshes of missiles still in flight (`length = 0` on the
+  // array orphaned their geometry and material, while inbound missiles one line
+  // away were disposed properly).
+  const systemChange = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    // A block this far into the run has already changed mode several times, so
+    // it reports what it could not do rather than throwing: an exception here
+    // would take the whole suite down with a bare `undefined` and hide which
+    // check was even being attempted.
+    try {
+      g.player.fuel = g.player.fuelMax;
+      // Lock something, so there is a real target to lose.
+      const ships = g.session.traffic.ships.filter((s) => !s.dead);
+      g.session.target = ships[0] || null;
+      const hadTarget = !!g.session.target;
+      // Put a missile of the player's in the air, aimed at that target.
+      let hadMissile = false;
+      if (g.session.target) {
+        const before = g.session.missiles.length;
+        g.player.missiles = Math.max(g.player.missiles, 1);
+        g.launchMissile();
+        hadMissile = g.session.missiles.length > before;
+      }
+      if (!hadTarget || !hadMissile) {
+        return { ok: false, reason: 'could not stage: target=' + hadTarget
+          + ' missile=' + hadMissile + ' ships=' + ships.length };
+      }
+      // The meshes are still in the scene graph, so a cleanup that forgets them
+      // leaves the count unchanged after the jump.
+      const orphans = g.session.missiles
+        .filter((m) => m.mesh && m.mesh.parent)
+        .map((m) => m.mesh);
+      const from = g.system.index;
+      let target = -1;
+      for (const s of g.galaxy.systems) {
+        if (s.index !== from && g.canJump(s.index).ok) { target = s.index; break; }
+      }
+      if (target < 0) return { ok: false, reason: 'nothing reachable' };
+      g.jumpTo(target);
+      for (let i = 0; i < 240; i++) g.step(1 / 60, 500 + i / 60);
+      return {
+        ok: true,
+        hadTarget: hadTarget,
+        hadMissile: hadMissile,
+        targetAfter: g.session.target === undefined ? 'undefined' : g.session.target,
+        missilesAfter: g.session.missiles.length,
+        // A mesh that was disposed and removed has no parent left.
+        orphansInScene: orphans.filter((m) => !!m.parent).length,
+        to: g.system.index,
+        expected: target,
+      };
+    } catch (err) {
+      return { ok: false, reason: 'threw: ' + (err && err.message) };
+    }
+  });
+  check('a jumped-away system takes the player\'s target lock with it',
+    systemChange && systemChange.ok && systemChange.targetAfter === null,
+    systemChange && systemChange.ok
+      ? 'hadTarget=' + systemChange.hadTarget
+        + ' targetAfter=' + JSON.stringify(systemChange.targetAfter)
+      : (systemChange && systemChange.reason) || 'no result');
+  check('a jumped-away system leaves no orphaned missile mesh in the scene',
+    systemChange && systemChange.ok && systemChange.orphansInScene === 0,
+    systemChange && systemChange.ok
+      ? systemChange.missilesAfter + ' missile(s) left, '
+        + systemChange.orphansInScene + ' orphan mesh(es) attached'
+      : (systemChange && systemChange.reason) || 'no result');
+  check('the system change that dropped them actually happened',
+    systemChange && systemChange.ok && systemChange.to === systemChange.expected,
+    systemChange && systemChange.ok
+      ? systemChange.to + ' (expected ' + systemChange.expected + ')'
+      : (systemChange && systemChange.reason) || 'no result');
 
   // Put the game back into flight for everything below, which assumes it.
   await page.evaluate(() => window.__ELITE_GAME__.undock());
@@ -476,6 +615,62 @@ try {
     'hp before ' + combat.hpBefore + ', died ' + combat.died);
   check('destroying a hostile ship is possible', combat.ok === true);
 
+  // --- Wreckage is reachable, and does not leak --------------------------
+  // The kill handler called `dropCargo` and threw the result away for as long
+  // as the function existed, so the canisters were never in a list any scan
+  // walked: scooping could not fire, and nothing ever freed the meshes. Only a
+  // live scene can show this - the leak is invisible to a unit test because it
+  // is the scene group that keeps growing.
+  const wreck = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    g.setMode('flight');
+    // A trader, because it is the kind that carries cargo.
+    const trader = g.session.traffic.ships.find(s => s.kind === 'trader' && s.cargo)
+      || g.session.traffic.spawn('trader');
+    trader.hostile = false;
+    trader.aggression = 0;
+    const sceneBefore = g.renderer.scene.children.length;
+    const inListBefore = g.session.traffic.ships.length;
+    const killed = g.strike(trader, 9999);
+
+    const canisters = g.session.traffic.ships.filter(s => s.kind === 'canister');
+    const capsules = g.session.traffic.ships.filter(s => s.kind === 'capsule');
+    const meshesPresent = canisters.every(
+      c => g.renderer.scene.children.indexOf(c.mesh) >= 0);
+    const finite = canisters.every(c => Number.isFinite(c.mesh.position.x)
+      && Number.isFinite(c.mesh.position.y) && Number.isFinite(c.mesh.position.z));
+
+    // Let them be simulated for a moment, which is where a missing `turnRate`
+    // turns the quaternion - and then the position - into NaN.
+    for (let i = 0; i < 90; i++) g.step(1 / 60, 6000 + i / 60, { render: false });
+    const finiteAfter = canisters.every(c => Number.isFinite(c.mesh.position.x)
+      && Number.isFinite(c.mesh.position.y) && Number.isFinite(c.mesh.position.z));
+
+    return {
+      killed: killed === true,
+      sceneBefore: sceneBefore,
+      inListBefore: inListBefore,
+      inListAfter: g.session.traffic.ships.length,
+      canisters: canisters.length,
+      capsules: capsules.length,
+      meshesPresent: meshesPresent,
+      finite: finite,
+      finiteAfter: finiteAfter,
+      sceneAfter: g.renderer.scene.children.length,
+    };
+  });
+  check('killing a laden ship drops wreckage into the scanned list',
+    wreck.killed && wreck.canisters > 0 && wreck.inListAfter > wreck.inListBefore,
+    wreck.canisters + ' canister(s) in a list of ' + wreck.inListAfter
+      + ' (was ' + wreck.inListBefore + ')');
+  check('the wreckage meshes are in the scene, so they can be seen and hit',
+    wreck.meshesPresent === true);
+  check('the wreckage stays finite once the simulation steps it',
+    wreck.finite === true && wreck.finiteAfter === true,
+    'before=' + wreck.finite + ' after=' + wreck.finiteAfter);
+  check('a killed crewed ship leaves a capsule behind', wreck.capsules > 0,
+    wreck.capsules + ' capsule(s)');
+
   const resources = await page.evaluate(() => {
     const g = window.__ELITE_GAME__;
     return {
@@ -622,6 +817,65 @@ try {
     'cash ' + save.cash);
   check('a save remembers the last station docked at', save.dockedAt === 7,
     'dockedAt came back as ' + JSON.stringify(save.dockedAt));
+
+  // --- A semantically broken save must not brick the game -----------------
+  // The seed check alone let any of these through, and each one then failed on
+  // *every* boot, because the save is reloaded every boot: a string `cash`
+  // broke the station screen, and a `currentSystem` past the end of the table
+  // threw on arrival. There was no way out from inside the game.
+  const broken = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    const key = Object.keys(localStorage).find((k) => k.indexOf('elite') >= 0)
+      || 'elite-deep-save.v1';
+    const good = localStorage.getItem(key);
+    const base = JSON.parse(good);
+    const results = {};
+
+    const cases = {
+      stringCash: { player: Object.assign({}, base.player, { cash: '4242' }) },
+      badSystem: { player: Object.assign({}, base.player, { currentSystem: 99999 }) },
+      infiniteFuel: { player: Object.assign({}, base.player, { fuel: 1e999 }) },
+      unknownCargo: {
+        player: Object.assign({}, base.player, { cargo: { unobtainium: 4 } }),
+      },
+      unknownFaction: {
+        player: Object.assign({}, base.player, { standing: { KLINGON: 5 } }),
+      },
+    };
+
+    for (const name of Object.keys(cases)) {
+      const payload = Object.assign({}, base, cases[name]);
+      localStorage.setItem(key, JSON.stringify(payload));
+      const p = g.load();
+      results[name] = {
+        // `load` returns false when the game fell back to a fresh commander.
+        rejected: p === false || p === null,
+        cashFinite: Number.isFinite(g.player.cash),
+        systemValid: Number.isInteger(g.player.currentSystem)
+          && g.player.currentSystem >= 0
+          && g.player.currentSystem < 64,
+      };
+    }
+
+    // And the honest control: the untouched save must still load.
+    localStorage.setItem(key, good);
+    const restored = g.load();
+    results.goodStillLoads = restored !== false && restored !== null;
+    results.goodCash = g.player.cash;
+    return results;
+  });
+  const brokenNames = ['stringCash', 'badSystem', 'infiniteFuel', 'unknownCargo', 'unknownFaction'];
+  for (const name of brokenNames) {
+    check('a save with ' + name + ' is refused rather than loaded',
+      broken[name].rejected === true,
+      'rejected=' + broken[name].rejected);
+  }
+  check('a refused save leaves the game in a playable state',
+    brokenNames.every((n) => broken[n].cashFinite && broken[n].systemValid),
+    brokenNames.map((n) => n + ':' + broken[n].cashFinite + '/' + broken[n].systemValid).join(' '));
+  check('a good save still loads after a broken one was refused',
+    broken.goodStillLoads === true && broken.goodCash === 4242,
+    'restored=' + broken.goodStillLoads + ' cash=' + broken.goodCash);
 
   // --- Death and recovery -------------------------------------------------
   const death = await page.evaluate(() => {

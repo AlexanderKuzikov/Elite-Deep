@@ -212,6 +212,141 @@ test('a corrupt save payload does not throw on the way in', () => {
   assert.doesNotThrow(() => P.deserialize({ name: 'X' }));
 });
 
+// --- Save validation -------------------------------------------------------
+//
+// The seed check in `loadGame` says the save belongs to this galaxy. It says
+// nothing about whether the record is playable, and an unplayable record used
+// to reach the game whole: `enterSystem` indexes the system table directly, and
+// the station screen formats `cash`. Both fail on every boot, and the save is
+// reloaded every boot, so nothing inside the game can recover it.
+
+/** The vocabulary the game validates against, built the way `main.js` does. */
+const VOCAB = {
+  systems: 64,
+  commodities: ['food', 'machinery', 'gold'],
+  factions: ['FEDERATION', 'EMPIRE', 'ALLIANCE', 'INDEPENDENT'],
+  equipment: ['cargoExt', 'scoop', 'docking'],
+};
+
+/** A save that passes, so each test can break exactly one thing. */
+function goodSave(over) {
+  const p = P.create();
+  p.cash = 1234;
+  p.currentSystem = 7;
+  p.dockedAt = 7;
+  p.cargo = { food: 3 };
+  p.equip = { scoop: true };
+  p.standing = { EMPIRE: -12 };
+  p.contracts = [{ deadlineDay: 40, type: 'delivery' }];
+  const raw = JSON.parse(P.serialize(p));
+  return Object.assign(raw, over || {});
+}
+
+test('a well-formed save passes validation', () => {
+  const v = P.validateSave(goodSave(), VOCAB);
+  assert.equal(v.ok, true, 'a save the game itself wrote was rejected: ' + v.reason);
+});
+
+test('a valid save round-trips through the checked loader', () => {
+  const p = P.deserializeChecked(JSON.stringify(goodSave()), VOCAB);
+  assert.ok(p, 'the checked loader rejected a good save');
+  assert.equal(p.cash, 1234);
+  assert.equal(p.currentSystem, 7);
+});
+
+test('a save with a string where a number belongs is rejected', () => {
+  // This is the one that rendered the station screen as a broken line: the
+  // screen formats `cash`, and "1234" + 500 is "1234500".
+  const v = P.validateSave(goodSave({ cash: '1234' }), VOCAB);
+  assert.equal(v.ok, false, 'a string cash was accepted');
+  assert.match(v.reason, /cash/);
+  assert.equal(P.deserializeChecked(JSON.stringify(goodSave({ cash: '1234' })), VOCAB), null);
+});
+
+test('a save naming a system that does not exist is rejected', () => {
+  // `enterSystem` does `galaxy.systems[index].name`, so this is the one that
+  // throws rather than merely drawing badly.
+  for (const bad of [64, 99999, -1, 2.5, null]) {
+    const v = P.validateSave(goodSave({ currentSystem: bad }), VOCAB);
+    assert.equal(v.ok, false, 'currentSystem ' + bad + ' was accepted');
+    assert.match(v.reason, /currentSystem/);
+  }
+});
+
+test('a save with no last station, or a bad one, is judged separately', () => {
+  // A commander who has never docked legitimately has `dockedAt: null`, and
+  // that must keep working - it is how the death screen knows to use system 0.
+  assert.equal(P.validateSave(goodSave({ dockedAt: null }), VOCAB).ok, true,
+    'a never-docked commander was rejected');
+  const v = P.validateSave(goodSave({ dockedAt: 200 }), VOCAB);
+  assert.equal(v.ok, false, 'dockedAt past the end of the galaxy was accepted');
+  assert.match(v.reason, /dockedAt/);
+});
+
+test('infinite or missing fuel is rejected rather than clamped silently', () => {
+  // `JSON.parse` cannot produce Infinity from `1e999` - it yields Infinity for
+  // the literal, and `null` for a genuine `Infinity` token - so both spellings
+  // are worth checking.
+  assert.equal(P.validateSave(goodSave({ fuel: null }), VOCAB).ok, false);
+  assert.equal(P.validateSave(goodSave({ fuel: Infinity }), VOCAB).ok, false);
+  assert.equal(P.validateSave(goodSave({ fuel: NaN }), VOCAB).ok, false);
+  const missing = goodSave();
+  delete missing.fuel;
+  assert.equal(P.validateSave(missing, VOCAB).ok, false, 'a save with no fuel was accepted');
+});
+
+test('a save carrying a commodity that does not exist is rejected', () => {
+  // An unknown key would sit in the hold for ever: the market only iterates
+  // the commodity table, so nothing would ever sell it or take it away.
+  const v = P.validateSave(goodSave({ cargo: { unobtainium: 4 } }), VOCAB);
+  assert.equal(v.ok, false, 'unknown cargo was accepted');
+  assert.match(v.reason, /unobtainium/);
+});
+
+test('a fractional or negative cargo count is rejected', () => {
+  assert.equal(P.validateSave(goodSave({ cargo: { food: 2.5 } }), VOCAB).ok, false);
+  assert.equal(P.validateSave(goodSave({ cargo: { food: -3 } }), VOCAB).ok, false);
+  assert.equal(P.validateSave(goodSave({ cargo: { food: 0 } }), VOCAB).ok, true,
+    'an empty entry is harmless and should not reject the save');
+});
+
+test('a save with a fitting that does not exist is rejected', () => {
+  const v = P.validateSave(goodSave({ equip: { warpDrive: true } }), VOCAB);
+  assert.equal(v.ok, false, 'unknown equipment was accepted');
+  assert.match(v.reason, /warpDrive/);
+});
+
+test('a save naming a faction that does not exist is rejected', () => {
+  const v = P.validateSave(goodSave({ standing: { KLINGON: 5 } }), VOCAB);
+  assert.equal(v.ok, false, 'unknown faction was accepted');
+  assert.match(v.reason, /KLINGON/);
+});
+
+test('a contract with no usable deadline is rejected', () => {
+  // `MISSIONS.daysLeft` and the board sort both subtract from this field.
+  const v = P.validateSave(goodSave({ contracts: [{ type: 'delivery' }] }), VOCAB);
+  assert.equal(v.ok, false, 'a contract with no deadline was accepted');
+  assert.match(v.reason, /deadline/);
+});
+
+test('garbage that is not a save at all is rejected, not thrown on', () => {
+  for (const bad of [null, undefined, 42, 'a string', [1, 2, 3]]) {
+    assert.doesNotThrow(() => P.validateSave(bad, VOCAB));
+    assert.equal(P.validateSave(bad, VOCAB).ok, false, 'accepted ' + JSON.stringify(bad));
+  }
+  assert.equal(P.deserializeChecked('{ not json', VOCAB), null, 'unparseable JSON threw');
+});
+
+test('validation is skipped only where there is nothing to validate against', () => {
+  // `main.js` always has the galaxy and the tables, but a caller that passes no
+  // vocabulary must not be told every save is broken - the shape checks and the
+  // numeric checks still apply.
+  const v = P.validateSave(goodSave(), {});
+  assert.equal(v.ok, true, 'a good save was rejected for want of a vocabulary');
+  assert.equal(P.validateSave(goodSave({ cash: 'nope' }), {}).ok, false,
+    'the numeric checks were skipped too');
+});
+
 // --- Equipment -------------------------------------------------------------
 
 test('each piece of equipment has the effect its description promises', () => {

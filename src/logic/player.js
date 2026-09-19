@@ -432,6 +432,192 @@ function deserialize(json) {
   return p;
 }
 
+/**
+ * A number that is present and finite, or a fallback.
+ *
+ * `Number.isFinite` rather than a `typeof` check, because the failure this
+ * exists to stop is not a missing field - it is a field that parsed fine and
+ * is still unusable. `JSON.parse` turns `Infinity` into `null` and accepts
+ * `1e999` as `Infinity`, so a save with unlimited fuel is something a player
+ * can actually produce by editing the string, and a string `cash` is what a
+ * hand-edited or half-written save looks like.
+ */
+function finiteOr(value, fallback) {
+  return typeof value === 'number' && isFinite(value) ? value : fallback;
+}
+
+/** Clamp to a range, falling back first if the value is not usable at all. */
+function clamped(value, lo, hi, fallback) {
+  return Math.max(lo, Math.min(hi, finiteOr(value, fallback)));
+}
+
+/**
+ * Is this a save we can actually play?
+ *
+ * `loadGame` used to check only that the JSON parsed and that the galaxy seed
+ * matched, and then hand the record straight to `deserialize`, which is an
+ * unguarded `Object.assign`. That is not a security boundary - this is an
+ * offline game with no server and no other players - but it *is* a way to
+ * brick the game, which is worse here than a crash would be: `enterSystem`
+ * indexes `galaxy.systems[currentSystem]` and throws on a system that does not
+ * exist, and the station screen formats `cash` as a number, so a string there
+ * renders the whole screen as one broken line. The game then fails on every
+ * boot, and nothing short of clearing storage by hand recovers it.
+ *
+ * So this rejects rather than repairs. Repairing a semantically broken save
+ * means inventing a history the player did not have - which is exactly the
+ * silent data loss the project already refuses elsewhere - and a fresh start
+ * on a galaxy with the same seed is a legitimate, playable state.
+ *
+ * The known-good sets are passed in rather than imported: this module imports
+ * only `reputation.js`, on purpose, and pulling in the commodity and faction
+ * tables to validate a save would be the first real dependency cycle in the
+ * project. The caller already holds all of them.
+ *
+ * Returns `{ ok: true }` or `{ ok: false, reason: '...' }`.
+ */
+function validateSave(d, options) {
+  var opts = options || {};
+  var reasons = [];
+
+  if (!d || typeof d !== 'object' || Array.isArray(d)) {
+    return { ok: false, reason: 'not an object' };
+  }
+
+  var systems = finiteOr(opts.systems, 0);
+  var commodities = opts.commodities || [];
+  var factions = opts.factions || [];
+  var equipment = opts.equipment || [];
+
+  // --- The fields the rest of the game does arithmetic on ------------------
+  // Anything that reaches a screen as a number has to *be* a number, or the
+  // screen renders "NaN" or throws. These are the ones with no safe fallback,
+  // because a wrong value is worse than a rejected save.
+  var numeric = ['cash', 'day', 'fuel', 'hull', 'shields', 'missiles', 'kills'];
+  for (var i = 0; i < numeric.length; i += 1) {
+    var key = numeric[i];
+    if (typeof d[key] !== 'number' || !isFinite(d[key])) {
+      reasons.push(key + ' is not a finite number');
+    }
+  }
+  if (d.cash < 0) reasons.push('cash is negative');
+
+  // --- The system the commander is standing in -----------------------------
+  // This is the one that throws rather than draws badly: `enterSystem` reads
+  // `galaxy.systems[index]` and then `.name` off the result.
+  if (systems > 0) {
+    var here = d.currentSystem;
+    if (typeof here !== 'number' || !isFinite(here) || here % 1 !== 0
+      || here < 0 || here >= systems) {
+      reasons.push('currentSystem ' + here + ' is not a system index');
+    }
+    if (d.dockedAt !== undefined && d.dockedAt !== null) {
+      var at = d.dockedAt;
+      if (typeof at !== 'number' || !isFinite(at) || at % 1 !== 0 || at < 0 || at >= systems) {
+        reasons.push('dockedAt ' + at + ' is not a system index');
+      }
+    }
+  }
+
+  // --- Cargo --------------------------------------------------------------
+  // Keys must be real commodities and counts must be positive integers. An
+  // unknown key would sit in the hold for ever, unremovable and unsellable,
+  // because the market only ever iterates the commodity table.
+  if (d.cargo !== undefined && d.cargo !== null) {
+    if (typeof d.cargo !== 'object' || Array.isArray(d.cargo)) {
+      reasons.push('cargo is not an object');
+    } else {
+      var keys = Object.keys(d.cargo);
+      for (var c = 0; c < keys.length; c += 1) {
+        var id = keys[c];
+        if (commodities.length && commodities.indexOf(id) < 0) {
+          reasons.push('cargo holds unknown commodity ' + id);
+          continue;
+        }
+        var tons = d.cargo[id];
+        if (typeof tons !== 'number' || !isFinite(tons) || tons < 0 || tons % 1 !== 0) {
+          reasons.push('cargo of ' + id + ' is not a whole tonnage');
+        }
+      }
+    }
+  }
+
+  // --- Equipment ----------------------------------------------------------
+  // Same reasoning as cargo: an unknown id is a permanent phantom fitting.
+  // `equip` is merged onto the defaults, so it is legitimately sparse.
+  if (d.equip !== undefined && d.equip !== null) {
+    if (typeof d.equip !== 'object' || Array.isArray(d.equip)) {
+      reasons.push('equip is not an object');
+    } else if (equipment.length) {
+      var fit = Object.keys(d.equip);
+      for (var e = 0; e < fit.length; e += 1) {
+        if (equipment.indexOf(fit[e]) < 0) {
+          reasons.push('unknown equipment ' + fit[e]);
+        }
+      }
+    }
+  }
+
+  // --- Standing -----------------------------------------------------------
+  // Unknown faction keys are harmless (nothing reads them) but they mean the
+  // save is not the shape this game writes, so they are still a rejection.
+  if (d.standing !== undefined && d.standing !== null) {
+    if (typeof d.standing !== 'object' || Array.isArray(d.standing)) {
+      reasons.push('standing is not an object');
+    } else if (factions.length) {
+      var names = Object.keys(d.standing);
+      for (var f = 0; f < names.length; f += 1) {
+        if (factions.indexOf(names[f]) < 0) {
+          reasons.push('standing names unknown faction ' + names[f]);
+        } else {
+          var val = d.standing[names[f]];
+          if (typeof val !== 'number' || !isFinite(val)) {
+            reasons.push('standing with ' + names[f] + ' is not a number');
+          }
+        }
+      }
+    }
+  }
+
+  // --- Contracts ----------------------------------------------------------
+  if (d.contracts !== undefined && d.contracts !== null) {
+    if (!Array.isArray(d.contracts)) {
+      reasons.push('contracts is not an array');
+    } else {
+      for (var k = 0; k < d.contracts.length; k += 1) {
+        var con = d.contracts[k];
+        if (!con || typeof con !== 'object') {
+          reasons.push('contract ' + k + ' is not an object');
+        } else if (typeof con.deadlineDay !== 'number' || !isFinite(con.deadlineDay)) {
+          reasons.push('contract ' + k + ' has no usable deadline');
+        }
+      }
+    }
+  }
+
+  if (reasons.length) return { ok: false, reason: reasons[0], reasons: reasons };
+  return { ok: true, reasons: [] };
+}
+
+/**
+ * `deserialize`, but only for a save that survives `validateSave`.
+ *
+ * Returns `null` on rejection so the caller takes the same path it already
+ * takes for unparseable JSON - start a fresh commander. `options` is passed
+ * through to the validator.
+ */
+function deserializeChecked(json, options) {
+  var d;
+  try {
+    d = typeof json === 'string' ? JSON.parse(json) : json;
+  } catch (err) {
+    return null;
+  }
+  var verdict = validateSave(d, options);
+  if (!verdict.ok) return null;
+  return deserialize(d);
+}
+
 export {
   RANKS,
   EQUIPMENT,
@@ -470,6 +656,8 @@ export {
   standingLabel,
   serialize,
   deserialize,
+  validateSave,
+  deserializeChecked,
 };
 
 /**

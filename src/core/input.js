@@ -171,6 +171,15 @@ export function createInput(target, options) {
     pointerTarget: opts.pointerTarget || el,
     // Seconds left before a lock may be requested again. See `relockDelay`.
     relockIn: 0,
+    /**
+     * Set while a release the *game* decided on is in flight.
+     *
+     * `releaseMouse(state, true)` sets it; `onPointerLockChange` consumes it, so
+     * the change event the release fires does not arm the player-facing
+     * cooldown. Without it the flag and the event fight, and whichever runs
+     * last wins - which is not a race worth having when the answer is known.
+     */
+    quietRelease: false,
     // Last frame's delta, so `endFrame` can advance the cooldown without the
     // caller having to remember to pass it.
     lastDt: 1 / 60,
@@ -282,7 +291,19 @@ export function createInput(target, options) {
       // That refusal is what used to kill the mouse for the rest of the
       // session. `releaseMouse` sets the same value; setting it twice is the
       // same as setting it once.
-      state.relockIn = Math.max(state.relockIn, MOUSE.relockDelay);
+      //
+      // Unless the release was the game's own decision - docking, dying, the
+      // chart. Those set `quietRelease` before releasing, and the event fires
+      // as a consequence of something the player did not ask for. Arming the
+      // delay there is what made a routine undock launch a dead mouse. The
+      // flag is consumed here rather than checked later so it can never leak
+      // into an unrelated release.
+      if (state.quietRelease) {
+        state.quietRelease = false;
+        state.relockIn = 0;
+      } else {
+        state.relockIn = Math.max(state.relockIn, MOUSE.relockDelay);
+      }
     }
     notifyLock(state);
   }
@@ -503,6 +524,11 @@ export function requestMouse(state) {
   // player gets no mouse, and the hint on screen has to say so.
   if (target.isConnected === false) return false;
   try {
+    // A request means the quiet release is over and done with, whatever the
+    // browser did or did not deliver. Clearing it here is what keeps the flag
+    // from leaking into a later, unrelated loss, without a timer racing the
+    // change event that the release itself fires.
+    state.quietRelease = false;
     // Chrome returns a promise here and rejects it when the request is not
     // backed by a gesture; older browsers return nothing. Either way a failure
     // must not surface as an unhandled rejection, so it is swallowed and the
@@ -535,13 +561,32 @@ export function lockRefused(state) {
  * this function. Setting it here as well means a caller that releases the
  * pointer in an environment where no change event follows (a test, or a
  * browser that stays silent) still gets the delay.
+ *
+ * `quiet` is for a release the *game* decides on, with no Escape behind it.
+ * The cooldown exists to answer a player who asked for their cursor back; a
+ * commander who docks and undocks again a second later asked for nothing, and
+ * arming the delay for them means the ship launches with a dead mouse and a
+ * hint telling them to click - which is the same symptom as the bug this
+ * cooldown was added to fix. Docking and dying pass `quiet`; anything that
+ * stands in for Escape does not.
  */
-export function releaseMouse(state) {
+export function releaseMouse(state, quiet) {
+  // Tell `onPointerLockChange` that the release about to happen was the game's
+  // decision, so the change event it fires does not re-arm the cooldown.
+  //
+  // The flag is deliberately *not* cleared on a timer. Chrome fires
+  // `pointerlockchange` for `exitPointerLock` asynchronously - measured, it
+  // arrives after a `setTimeout(..., 0)` has already run - so a timer that
+  // clears the flag "in case no event comes" clears it just before the event
+  // it was waiting for. Stale-flag risk is handled the other way round: the
+  // flag is consumed by the change handler, and a *request* also clears it, so
+  // it can never survive into a later, unrelated release.
+  if (quiet) state.quietRelease = true;
   if (typeof document !== 'undefined' && document.exitPointerLock) {
     try { document.exitPointerLock(); } catch (err) { /* nothing to exit */ }
   }
   state.pointerLocked = false;
-  state.relockIn = MOUSE.relockDelay;
+  state.relockIn = quiet ? 0 : MOUSE.relockDelay;
   state.mouse.x = 0;
   state.mouse.y = 0;
   state.mouseTarget.x = 0;

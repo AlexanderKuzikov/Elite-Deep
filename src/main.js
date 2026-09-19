@@ -432,10 +432,15 @@ export function boot(host, options) {
     session.traffic.topUp();
     session.traffic.topUp();
 
-    session.missiles.length = 0;
+    clearMissiles();
     clearIncoming();
     session.shots.length = 0;
     session.tracers.length = 0;
+    // The lock has to go with the system. Everything else that pointed into the
+    // old scene is dropped here; a surviving `session.target` kept the HUD
+    // drawing a lock box around a mesh that no longer belongs to anything, and
+    // a missile in flight would have homed on that ghost.
+    session.target = null;
     session.grace = arrival === 'station' ? ARRIVAL_GRACE : 0;
     session.sinceDamage = 99;
     session.shotCooldown = 0;
@@ -551,13 +556,20 @@ export function boot(host, options) {
     session.modeTime = 0;
 
     if (mode === MODE.DOCKED) {
-      INPUT.releaseMouse(input);
+      // Quiet: docking is the game taking the cursor back to show a screen, not
+      // the player asking for it. Arming the re-lock delay here punished the
+      // ordinary dock-then-undock - the mouse came back dead and the hint told
+      // the player to click, which reads exactly like the bug the cooldown was
+      // introduced to fix, but with no Escape anywhere in sight.
+      INPUT.releaseMouse(input, true);
       stationUi.open(stationState());
     } else if (previous === MODE.DOCKED) {
       stationUi.close();
     }
     if (mode === MODE.DEAD) {
-      INPUT.releaseMouse(input);
+      // Quiet for the same reason: the death screen needs the cursor, and the
+      // player did not ask to be there.
+      INPUT.releaseMouse(input, true);
     }
     // The "your pointer is free" notice belongs to the flight view and to a
     // player who is still flying. Leaving flight by any route - docking,
@@ -1049,6 +1061,22 @@ export function boot(host, options) {
     }
   }
 
+  /**
+   * The known-good sets a save is checked against.
+   *
+   * Gathered here because `player.js` deliberately imports nothing but
+   * `reputation.js`, and having it reach into the commodity and faction tables
+   * to validate a save would be the first dependency cycle in the project.
+   */
+  function saveVocabulary() {
+    return {
+      systems: galaxy.systems.length,
+      commodities: ECONOMY.COMMODITIES.map((c) => c.id),
+      factions: FACTIONS.FACTION_IDS,
+      equipment: PLAYER.EQUIPMENT.map((e) => e.id),
+    };
+  }
+
   function loadGame() {
     if (!hasStorage()) return null;
     try {
@@ -1056,7 +1084,19 @@ export function boot(host, options) {
       if (!raw) return null;
       const data = JSON.parse(raw);
       if (!data || !data.player || data.seed !== GALAXY_SEED) return null;
-      const p = PLAYER.deserialize(data.player);
+      // The seed check says this save belongs to this galaxy. It says nothing
+      // about whether the record inside it is playable, and an unplayable one
+      // used to reach the game intact: a string `cash` broke the station
+      // screen, and a `currentSystem` past the end of the table threw on
+      // arrival. Both are unrecoverable from inside the game, because the save
+      // is reloaded on every boot. A fresh start on the same galaxy is a real
+      // state, so a save that fails validation takes the path broken JSON
+      // already takes.
+      const p = PLAYER.deserializeChecked(data.player, saveVocabulary());
+      if (!p) {
+        log('save: rejected as not playable, starting fresh');
+        return null;
+      }
       log('save: loaded commander ' + p.name);
       return p;
     } catch (err) {
@@ -1160,11 +1200,24 @@ export function boot(host, options) {
   // -------------------------------------------------------------------------
 
   /**
-   * Advance the clock. Called on a jump and on docking.
+   * Advance the clock by one day. The only place that does.
    *
-   * `player.day` drives market drift, and `activity` accelerates it. Both
-   * matter: drifting prices only when the player trades means the effect is
-   * immediately visible rather than buried in noise.
+   * Two events cost a day, and only two: completing a jump (`completeJump`)
+   * and docking (`dock`). Everything that measures time in days - market
+   * drift, contract deadlines, the decay of offences and bounties - reads
+   * `player.day`, so this function is the single definition of what a day is.
+   *
+   * It used to be described elsewhere as "a day is a dock, a jump is free",
+   * and that was never true. `commitJumpScene` tears the old system down and
+   * `enterSystem` builds the new one, but arriving at the station is not
+   * docking: only the `dock()` path runs the contract desk and the save. So a
+   * hop in the game costs a day, and a three-hop contract genuinely spends
+   * three days in transit before the dock at the far end spends the fourth.
+   * The descriptions that disagreed with this one were fixed, not the code.
+   *
+   * `silent` suppresses the messages a player does not need to see twice -
+   * clearing a record and gaining a rank - for the jump, which is busy enough
+   * without them.
    */
   function decayDay(silent) {
     player.day += 1;
@@ -1321,9 +1374,26 @@ export function boot(host, options) {
       }
     }
 
-    // Traders and pirates carry cargo you can scoop.
-    if (entity.cargo) {
-      WORLD.dropCargo(renderer.scene, entity.mesh.position, entity.cargo, session.time | 0);
+    // Traders and pirates carry cargo you can scoop. The return value used to
+    // be discarded here, which made the whole mechanic dead: nothing put the
+    // canister in a list the collision scan walks, so it could never be picked
+    // up, and it never reached `prune` or the jump teardown either - every kill
+    // left a mesh, a geometry and a material in the scene for the life of the
+    // session. Handing it to the traffic puts it under all of those at once.
+    if (session.traffic) {
+      if (entity.cargo) {
+        session.traffic.addWreckage(
+          WORLD.dropCargo(renderer.scene, entity.mesh.position, entity.cargo, session.time | 0));
+      }
+      // A crewed hull that comes apart leaves a capsule behind. It used to be
+      // unreachable content: `dropCapsule` was called from a test and nowhere
+      // else, and the `kind === 'capsule'` branch of `scoop` could never run.
+      // Tying it to the same event the wreck drops from is what makes it real.
+      // Hostiles do not eject - the reward for rescuing a pirate is a fight.
+      if (!entity.hostile && (entity.kind === 'trader' || entity.kind === 'viper')) {
+        session.traffic.addWreckage(
+          [WORLD.dropCapsule(renderer.scene, entity.mesh.position, session.time | 0)]);
+      }
     }
 
     const pos = entity.mesh.position;
@@ -1629,10 +1699,7 @@ export function boot(host, options) {
       m.life -= dt;
       const target = m.target;
       if (m.life <= 0 || !target || target.dead) {
-        renderer.scene.remove(m.mesh);
-        m.mesh.geometry.dispose();
-        m.mesh.material.dispose();
-        session.missiles.splice(i, 1);
+        dropMissile(i);
         continue;
       }
       // Steer toward the target with a bounded turn rate, so a fast target can
@@ -1658,10 +1725,7 @@ export function boot(host, options) {
         spawnExplosion(m.mesh.position);
         if (died) onEntityDestroyed(target);
         else if (target.kind === 'trader' || target.kind === 'viper') markHostileTo(target);
-        renderer.scene.remove(m.mesh);
-        m.mesh.geometry.dispose();
-        m.mesh.material.dispose();
-        session.missiles.splice(i, 1);
+        dropMissile(i);
       }
     }
   }
@@ -1809,6 +1873,27 @@ export function boot(host, options) {
     while (session.incoming.length) dropIncoming(session.incoming.length - 1);
   }
 
+  function dropMissile(index) {
+    const m = session.missiles[index];
+    if (!m) return;
+    renderer.scene.remove(m.mesh);
+    m.mesh.geometry.dispose();
+    m.mesh.material.dispose();
+    session.missiles.splice(index, 1);
+  }
+
+  /**
+   * Remove every missile of the player's that is still in flight.
+   *
+   * The array used to be emptied with a bare `length = 0` on a system change,
+   * which left every geometry and material alive in a scene that was about to
+   * be thrown away - inbound missiles were disposed properly one line away, so
+   * the two paths disagreed about what "clearing a list" means.
+   */
+  function clearMissiles() {
+    while (session.missiles.length) dropMissile(session.missiles.length - 1);
+  }
+
   /** Apply any enemy shot that has finished its flight. */
   function stepEnemyShots() {
     for (let i = session.shots.length - 1; i >= 0; i -= 1) {
@@ -1934,7 +2019,10 @@ export function boot(host, options) {
   function openChart() {
     setMode(MODE.CHART);
     session.chartCursor = session.index;
-    INPUT.releaseMouse(input);
+    // Quiet: the player asked for the chart, not for their cursor back, and
+    // closing it returns them to flight where a re-lock delay would strand
+    // them with a dead mouse. Escape remains the one thing that arms it.
+    INPUT.releaseMouse(input, true);
     play('beep');
   }
 
@@ -2962,6 +3050,21 @@ export function boot(host, options) {
         locked: input.pointerLocked,
         mouseEnabled: input.mouseEnabled,
       };
+    },
+
+    /**
+     * Give the pointer back, the way Escape does.
+     *
+     * A driver needs this to test the *re-acquisition* path: the game is
+     * correct to refuse a request while it already holds the lock, so a check
+     * that wants to see a request has to start from a state where it does not.
+     * Reaching into `INPUT.releaseMouse` is the only way to get there without a
+     * real Escape, and it arms the same cooldown a real Escape would - which is
+     * itself the behaviour under test.
+     */
+    releasePointer() {
+      INPUT.releaseMouse(input);
+      return this.debugPointer();
     },
   };
 }

@@ -84,6 +84,49 @@ test('ids are unique within a board', () => {
   }
 });
 
+test('two cargoes on one route do not share an id', () => {
+  // The id used to be type:from:to:deadline:tons, which says nothing about
+  // *what* is being carried. Two different commodities, posted on the same
+  // route for the same tonnage and landing on the same deadline day, produced
+  // one id - and `accept` refuses a second contract with an id it already
+  // holds, so the board's duplicate guard fired on two genuinely different
+  // jobs. Courier and bounty have no commodity and keep their old ids.
+  const a = { type: 'delivery', system: { index: 1 }, target: { index: 2 },
+    commodity: 'FOOD', tons: 5, days: 4, day: 0 };
+  const b = Object.assign({}, a, { commodity: 'MEDICINE' });
+  assert.notEqual(M.offerId(a), M.offerId(b),
+    'two commodities on one route collided on the same id');
+
+  // Courier and bounty carry nothing, so the commodity slot is empty and their
+  // ids are unchanged apart from that.
+  const courier = { type: 'courier', system: { index: 1 }, target: { index: 2 },
+    commodity: null, tons: 0, days: 4, day: 0 };
+  assert.ok(M.offerId(courier).endsWith(':'),
+    'a commodity-less contract should leave an empty final slot');
+  assert.equal(M.offerId(courier).replace(/:$/, ''),
+    'courier:1:2:4:0',
+    'the id format changed for a contract that carries no commodity');
+});
+
+test('the same two cargoes can both be accepted', () => {
+  // The end-to-end form of the check above: with the id fixed, the duplicate
+  // guard no longer fires on two different jobs, so both can be taken.
+  const player = P.create();
+  const common = { type: 'delivery', system: { index: 1 }, target: { index: 2 },
+    tons: 5, days: 4, day: 0, distance: 1, hops: 1,
+    targetName: 'X', fromName: 'Y', targetIndex: 2, fromIndex: 1,
+    reward: 500, deadlineDay: 4, standingFaction: 'FEDERATION' };
+  const food = Object.assign({}, common, { commodity: 'FOOD' });
+  const meds = Object.assign({}, common, { commodity: 'MEDICINE' });
+  food.id = M.offerId(food);
+  meds.id = M.offerId(meds);
+
+  assert.equal(M.accept(player, food, 0).ok, true, 'the first was refused');
+  assert.equal(M.accept(player, meds, 0).ok, true,
+    'the second, different contract was refused as a duplicate');
+  assert.equal(player.contracts.length, 2, 'not both contracts are live');
+});
+
 // --- The board reflects the galaxy -----------------------------------------
 
 test('a delivery carries something the offering system actually produces', () => {
@@ -841,9 +884,13 @@ test('every contract target is reachable on a full tank', () => {
 });
 
 test('a contract never takes longer to fly than its own deadline allows', () => {
-  // A jump costs no day, but docking does, and a delivery needs one dock at the
-  // far end. So the number of jumps is the number of days the trip can cost at
-  // best - a job needing more hops than days is already lost when it is posted.
+  // A jump costs a day and so does the dock that hands the job in. So the
+  // shortest flyable route of N hops needs N + 1 days, and the deadline has to
+  // cover both. Asserting `hops <= days` was the old form of this check, and it
+  // let through the one case that matters: a job with `hops === days` arrives
+  // on its last day with nothing left to dock on, which is a contract lost
+  // before it is accepted. The board's own courier rule already uses
+  // `ceil(hops * daysPerHop) + 1` for exactly this reason.
   const impossible = [];
   let offers = 0;
 
@@ -855,9 +902,12 @@ test('a contract never takes longer to fly than its own deadline allows', () => 
         if (offer.type === 'bounty') continue;
         offers += 1;
         const hops = G.hopsBetween(galaxy, s.index, offer.targetIndex, player.fuelMax);
-        if (Number.isFinite(hops) && hops > offer.days) {
+        const needed = Number.isFinite(hops)
+          ? Math.ceil(hops * M.MISSION.daysPerHop) + 1
+          : Infinity;
+        if (needed > offer.days) {
           impossible.push(s.name + ' -> ' + offer.targetName
-            + ': ' + hops + ' hops in ' + offer.days + ' days');
+            + ': ' + hops + ' hops need ' + needed + ' days, has ' + offer.days);
         }
       }
     }
@@ -987,9 +1037,21 @@ test('the stake counts the cargo the fine does not', () => {
 
   // Only what is still missing counts: goods already aboard are not at risk,
   // because they were going to be spent anyway.
+  //
+  // A full hold is the case that matters, and it is the one `||` used to get
+  // wrong: `short` is 0, 0 is falsy, so the fallback fired and the stake was
+  // priced as though every tonne were still to be bought. Nothing is left to
+  // buy, so there is nothing to add to the fine.
   P.addCargo(player, offer.commodity, offer.tons);
-  assert.equal(M.stakeOf(player, contract, market), fine + 10 * offer.tons,
-    'a contract short of it is staked differently to one fully loaded');
+  assert.equal(M.stakeOf(player, contract, market), fine,
+    'a fully loaded contract is staked at more than its fine');
+
+  // A part load prices the remainder - neither the whole tonnage nor nothing.
+  P.removeCargo(player, offer.commodity, offer.tons);
+  const half = Math.floor(offer.tons / 2);
+  P.addCargo(player, offer.commodity, half);
+  assert.equal(M.stakeOf(player, contract, market), fine + 10 * (offer.tons - half),
+    'a part-loaded contract should stake only what is still missing');
 
   // A courier carries nothing, so there is nothing to add.
   assert.equal(M.stakeOf(player, { reward: 400 }, market), 140,

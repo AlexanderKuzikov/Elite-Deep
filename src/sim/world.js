@@ -768,6 +768,19 @@ export function createTraffic(scene, system, seed, options) {
     return entity;
   }
 
+  /**
+   * Is this entity a hull that counts against the traffic cap?
+   *
+   * Cargo canisters and escape capsules share the `ships` list so that one set
+   * of scans - collision, raycast, prune, dispose - covers them. They are not
+   * traffic, though, and counting them would mean a commander who scoops a few
+   * wrecks quietly starves the system of ships: `topUp` measures `ships.length`
+   * against `cap`, so every canister would hold a slot the traffic never fills.
+   */
+  function isTraffic(s) {
+    return s.kind !== 'canister' && s.kind !== 'capsule';
+  }
+
   /** Restock toward capacity. Called on a timer, not every frame. */
   function topUp() {
     const cap = Math.max(1, Math.round(
@@ -778,11 +791,13 @@ export function createTraffic(scene, system, seed, options) {
     // pocket and the system's own traffic stacked into a wall. Measured before
     // the change: a pocket of 4 in a danger-0 system produced 7 hostiles.
     let own = 0;
+    let live = 0;
     for (const s of ships) {
       if (s.pocket) own += 1;
+      if (isTraffic(s)) live += 1;
     }
     let guard = 0;
-    while (ships.length < cap && guard < cap + 4) {
+    while (live < cap && guard < cap + 4) {
       // While a cleanup contract is open the pocket keeps a floor of its own
       // hostiles. Without it a lawful system's spawn table - mostly traders -
       // would quietly starve the contract, and the commander would have to
@@ -790,6 +805,7 @@ export function createTraffic(scene, system, seed, options) {
       const wantHostile = own < pocket;
       spawn(null, wantHostile);
       if (wantHostile) own += 1;
+      live += 1;
       guard += 1;
     }
   }
@@ -807,6 +823,48 @@ export function createTraffic(scene, system, seed, options) {
     pocket = Math.max(0, Math.min(POCKET.maxExtra, Math.round(n || 0)));
     topUp();
     return pocket;
+  }
+
+  /**
+   * Adopt a wreck's dropped cargo, or an escape capsule, into the traffic list.
+   *
+   * This is what makes "shoot it down and scoop the wreck" a real mechanic
+   * instead of a promise in a comment. `dropCargo` has always built a complete
+   * entity - mesh, radius, spin, zero velocity - and returned it in an array,
+   * and the kill handler has always thrown that return value away. Nothing put
+   * the canister anywhere the collision scan looked, so scooping could never
+   * fire, and the mesh stayed in the scene for ever: not traffic, so `prune`
+   * and `dispose` never saw it either. Each kill leaked a mesh, a geometry and
+   * a material, and the leak survived a jump, because a jump only clears the
+   * system group.
+   *
+   * They go in `ships` rather than a list of their own so that every existing
+   * scan covers them without a second code path: the collision loop that calls
+   * `scoop`, the laser raycast, `prune`'s despawn sphere, and `dispose` on a
+   * jump. `isTraffic` keeps them out of the cap so they cannot starve the
+   * system of real ships.
+   */
+  function addWreckage(list) {
+    const added = [];
+    for (const entity of list || []) {
+      if (!entity || !entity.mesh) continue;
+      // A canister drifts rather than flies, and the traffic step does not
+      // branch on kind - every entity in this list is steered and integrated.
+      // So each field that step reads has to be a number, or it goes to NaN.
+      //
+      // Measured, not assumed: adopting `dropCargo`'s entity with only `speed`
+      // filled in still produced a canister at `NaN,NaN,NaN` within two seconds.
+      // `turnRate` was the culprit - `steerToward` computes `s.turnRate * dt`,
+      // `undefined * dt` is NaN, and `slerp(want, NaN)` writes NaN straight into
+      // the quaternion, from which `noseOf` and then the position follow. Both
+      // fields are read unconditionally, so both are made explicit here.
+      if (typeof entity.speed !== 'number') entity.speed = 0;
+      if (typeof entity.turnRate !== 'number') entity.turnRate = 0;
+      if (!entity.velocity) entity.velocity = { x: 0, y: 0, z: 0 };
+      ships.push(entity);
+      added.push(entity);
+    }
+    return added;
   }
 
   /** Remove ships that drifted beyond the despawn sphere, or were destroyed. */
@@ -873,7 +931,7 @@ export function createTraffic(scene, system, seed, options) {
      * times in isolation and failed once in a full run.
      */
     rand,
-    spawn, topUp, prune, setPocket, dispose,
+    spawn, topUp, prune, setPocket, dispose, addWreckage,
     seed,
   };
 }

@@ -591,8 +591,66 @@ test('the browser taking the pointer back arms the same cooldown', () => {
   assert.equal(I.requestMouse(state), false, 'the pointer was taken back on the next frame');
 });
 
-test('a refusal after Escape is not fatal', () => {
-  // The whole chain: Escape, an impatient click, a browser refusal. The last
+test('a release the game decides on is quiet, so a routine undock still flies', () => {
+  // Docking takes the cursor back to show the station screen, and the player
+  // pressed nothing. The player-facing cooldown answered a question nobody
+  // asked: dock, undock a second later, and the ship launched with a dead
+  // mouse and a hint telling the player to click - the same symptom as the bug
+  // the cooldown was added to fix, but with no Escape in the story.
+  const { doc, state } = capturedWindow();
+  assert.equal(I.mouseActive(state), true);
+
+  withDocumentOn(doc, () => I.releaseMouse(state, true));
+  assert.equal(state.pointerLocked, false, 'the pointer was not released');
+  assert.equal(state.relockIn, 0, 'a quiet release armed the player-facing cooldown');
+  assert.equal(I.requestMouse(state), true,
+    'the pointer could not be taken back after a quiet release');
+});
+
+test('a quiet release still stands in for Escape when asked to', () => {
+  // The other half: the cooldown has to survive for the case it exists for.
+  // `releaseMouse` with no second argument is the Escape-equivalent path, and
+  // it must still refuse an immediate re-lock.
+  const { doc, state } = capturedWindow();
+  withDocumentOn(doc, () => I.releaseMouse(state));
+  assert.ok(state.relockIn > 0, 'an Escape-equivalent release armed no cooldown');
+  assert.equal(I.requestMouse(state), false, 'the pointer came back on the next frame');
+});
+
+test('the change event a quiet release fires does not re-arm the cooldown', () => {
+  // The ordering hazard: `exitPointerLock` fires `pointerlockchange`, whose
+  // handler arms the cooldown by default. If the handler did not know the call
+  // was quiet, every docking would arm the player-facing delay through the
+  // back door - the flag would be pointless. So the release and the event it
+  // causes are checked together, in the only order that happens.
+  const { doc, state } = capturedWindow();
+  withDocumentOn(doc, () => {
+    // One call. It fires `pointerlockchange` internally, as the browser does.
+    I.releaseMouse(state, true);
+  });
+  assert.equal(state.relockIn, 0,
+    'the change event re-armed the cooldown after a quiet release');
+  assert.equal(state.quietRelease, false, 'the quiet flag was not consumed');
+});
+
+test('a later, separate loss is not silenced by an earlier quiet release', () => {
+  // The flag has to be consumed, not sticky. A commander who docks (quiet),
+  // undocks, and then presses Escape must still get the cooldown - otherwise
+  // the one case the delay exists for stops working after the first dock.
+  const { doc, state } = capturedWindow();
+  withDocumentOn(doc, () => {
+    I.releaseMouse(state, true);
+    doc.grant(state.pointerTarget);
+    assert.equal(I.mouseActive(state), true, 'the pointer was not taken back');
+    // Now a genuine browser release, with no quiet flag anywhere.
+    doc.exitPointerLock();
+  });
+  assert.ok(state.relockIn > 0,
+    'Escape after a quiet release armed no cooldown');
+  assert.equal(I.requestMouse(state), false, 'the pointer came back on the next frame');
+});
+
+test('a refusal after Escape is not fatal', () => {  // The whole chain: Escape, an impatient click, a browser refusal. The last
   // step used to end the session's mouse control. Now it costs one attempt.
   const { doc, win, state } = capturedWindow();
   const before = win.lockRequests;

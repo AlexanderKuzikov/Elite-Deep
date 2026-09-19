@@ -158,6 +158,92 @@ test('prune removes destroyed ships', () => {
   assert.equal(traffic.ships.length, 1);
 });
 
+test('dropped cargo can actually be reached by the collision scan', () => {
+  // The whole point of the mechanic, and the one thing that was broken: the
+  // kill handler built the canisters and threw the array away, so nothing the
+  // collision loop walks ever contained one and scooping could not fire.
+  const parent = new THREE.Group();
+  const traffic = W.createTraffic(parent, home, 8);
+  const dropped = W.dropCargo(parent, { x: 10, y: 0, z: 0 }, 'food', 1234);
+  assert.ok(dropped.length > 0, 'dropCargo produced nothing to adopt');
+
+  const added = traffic.addWreckage(dropped);
+  assert.equal(added.length, dropped.length);
+  for (const can of added) {
+    assert.ok(traffic.ships.indexOf(can) >= 0,
+      'the canister is not in the list the collision scan walks');
+  }
+  assert.equal(parent.children.length, dropped.length,
+    'the canister meshes are not in the scene');
+});
+
+test('a canister carries every field the simulation step reads', () => {
+  // `integrateEntity` reads `speed` and `velocity` with no guard. An undefined
+  // `speed` multiplies the nose into NaN and writes it into the mesh position,
+  // which poisons the canister on its first frame. `dropCargo` supplies both,
+  // and `addWreckage` fills them in if a future caller does not.
+  const parent = new THREE.Group();
+  const traffic = W.createTraffic(parent, home, 9);
+  const dropped = W.dropCargo(parent, { x: 5, y: 5, z: 5 }, 'machinery', 77);
+  const added = traffic.addWreckage(dropped);
+
+  for (const can of added) {
+    assert.equal(typeof can.speed, 'number', 'no numeric speed');
+    assert.ok(can.velocity, 'no velocity');
+    assert.ok(can.spin, 'no spin, so it would not turn');
+    assert.equal(typeof can.radius, 'number', 'no radius, so nothing can hit it');
+  }
+
+  const before = added.map((c) => ({ ...c.mesh.position }));
+  for (let i = 0; i < 120; i += 1) {
+    W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: 0 }, 1 / 60,
+      { onEnemyShot() {} });
+  }
+  added.forEach((can, i) => {
+    const p = can.mesh.position;
+    assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z),
+      'the canister position went non-finite: ' + p.x + ',' + p.y + ',' + p.z);
+    // A canister has no engine, so it must hold station rather than fly off.
+    assert.ok(Math.abs(p.x - before[i].x) < 1e-6 && Math.abs(p.y - before[i].y) < 1e-6
+      && Math.abs(p.z - before[i].z) < 1e-6, 'a canister drifted under its own power');
+  });
+});
+
+test('wreckage does not count against the traffic cap', () => {
+  // `topUp` measures the ship count against `cap`. If canisters were counted, a
+  // commander who scooped a few wrecks would quietly starve the system of
+  // traffic - the restock would think the sky was full.
+  const parent = new THREE.Group();
+  const quiet = { ...home, danger: 0 };
+  const traffic = W.createTraffic(parent, quiet, 12);
+  traffic.topUp();
+  const cap = traffic.ships.length;
+  assert.ok(cap > 0, 'no traffic to begin with');
+
+  const dropped = W.dropCargo(parent, { x: 0, y: 0, z: 0 }, 'food', 5);
+  traffic.addWreckage(dropped);
+  traffic.topUp();
+
+  assert.equal(traffic.ships.length, cap + dropped.length,
+    'the restock spawned on top of the wreckage or refused to spawn at all');
+});
+
+test('a jump takes the wreckage with it', () => {
+  // The canisters live in the renderer's scene, not the system group, so a jump
+  // only frees them through `dispose`. The comment on `createTraffic` records
+  // the same mistake being made once already with ships: 104 frozen hulls after
+  // twelve jumps.
+  const parent = new THREE.Group();
+  const traffic = W.createTraffic(parent, home, 13);
+  const dropped = W.dropCargo(parent, { x: 0, y: 0, z: 0 }, 'food', 6);
+  traffic.addWreckage(dropped);
+  assert.ok(parent.children.length > 0, 'nothing in the scene to clean up');
+
+  traffic.dispose();
+  assert.equal(traffic.ships.length, 0, 'the wreckage survived the jump');
+  assert.equal(parent.children.length, 0, 'the wreckage meshes are still in the scene');
+});
+
 test('ships fly nose-first along their own nose vector', () => {
   // The same +Z convention as models.js and flight.js. If this breaks, ships
   // visibly fly backwards, which is the single most embarrassing bug possible.
