@@ -13,6 +13,13 @@
  * what a player experiences.
  *
  * Usage: node scripts/e2e.mjs
+ *
+ * Every check is unconditional. A check that only runs when some earlier
+ * section left the page in a particular mode is not "conditional coverage",
+ * it is a check that is absent whenever the condition happens to be false -
+ * and if its detail text describes the failure, a green run then reports one.
+ * Both halves of that lesson cost a misleading log line on 2026-09-26; see
+ * the "rock check relaunches from death" block below.
  */
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -1005,9 +1012,20 @@ try {
   // at 100 units a second always cross the skin from six units out. This runs
   // stepped frames, which do not process input - so if the death check above
   // left the ship dead, relaunch first: dead frames neither fly nor collide.
-  if (await page.evaluate(() => window.__ELITE_GAME__.mode) === 'dead') {
-    check('rock check relaunches from death', await launchIfDead(), 'stuck dead');
-  }
+  //
+  // The relaunch is asserted unconditionally, and its outcome is the detail.
+  // The first version of this guard passed a literal 'stuck dead' as the
+  // message, so the line printed `PASS ... :: stuck dead` on every green run -
+  // the wording claimed a failure exactly where there was none. A check whose
+  // detail describes what it *would* have said is a lie in the log even when
+  // the verdict is right; the fix is to assert the real value.
+  //
+  // It has to happen before the `if`, because otherwise there is nothing to
+  // assert when the ship never died in the first place: the old form silently
+  // dropped one check out of the run, which is why the total read 90 against
+  // a documented 91 from the day this section was added.
+  check('rock check relaunches from death', await launchIfDead(),
+    'mode after launch: ' + await page.evaluate(() => window.__ELITE_GAME__.mode));
   const rockRam = await page.evaluate(() => {
     const g = window.__ELITE_GAME__;
     const rock = g.session.scene.rocks[0];

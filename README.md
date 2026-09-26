@@ -2,7 +2,7 @@
 
 <h1 align="center">ELITE: DEEP SPACE</h1>
 <p align="center">Современная 3D-реинкарнация Elite (1984) — один самодостаточный HTML-файл, ноль ассетов</p>
-<p align="center"><strong>v0.1.0</strong> · 694 юнита · 91 e2e · 725 kB (197 kB gzip)</p>
+<p align="center"><strong>v0.1.0</strong> · 694 юнита · 91 e2e · 708 kB (191 kB gzip)</p>
 
 ---
 
@@ -92,7 +92,7 @@ npm run check        # тесты + сборка + e2e
 
 **v0.1.0** — играбельно: полёт, бой, торговля, стыковка, прыжки, карта, рейтинг.
 694 юнита и 91 e2e-проверка зелёные, CI и Pages работают. Собранный файл —
-`dist/index.html`, 725 kB (197 kB gzip), открывается без сервера и без сети.
+`dist/index.html`, 708 kB (191 kB gzip), открывается без сервера и без сети.
 
 Открытые вопросы — дизайнерские, а не технические, перечислены в
 [`docs/CONTEXT.md`](docs/CONTEXT.md).
