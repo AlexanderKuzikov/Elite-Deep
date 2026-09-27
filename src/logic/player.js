@@ -328,11 +328,26 @@ function refuel(p) {
   if (p.cash < cost) {
     // Partial refuel is better than a flat refusal: being stranded is the
     // worst feeling in the genre and the original was notoriously cruel here.
+    //
+    // The two lines that matter are `spend` and the charging of it. It used to
+    // charge `Math.ceil(affordable * FUEL_PER_LY)` where `affordable` had been
+    // floored - so a commander with 1.9 CR and a tank one unit short of full
+    // bought the last unit for 2.0 and left with **-0.10 CR**. The same
+    // arithmetic on an empty tank bought a single unit for 2.0 against 1.9.
+    // `validateSave` lists `cash` among the numbers that must not be negative,
+    // so the game would write a save it refuses to load. `missions.js`
+    // `failOutcome` does the same job correctly: `min(fine, floor(cash))`.
     var affordable = Math.floor(p.cash / FUEL_PER_LY);
     if (affordable <= 0) return { ok: false, reason: 'funds' };
-    p.fuel = Math.min(p.fuelMax, p.fuel + affordable);
-    p.cash -= Math.ceil(affordable * FUEL_PER_LY);
-    return { ok: true, partial: true, cost: Math.ceil(affordable * FUEL_PER_LY) };
+    var spend = Math.min(affordable * FUEL_PER_LY, p.cash);
+    // Never buy more than the tank can take, and pay only for what it took.
+    // Rounding the fuel up to a whole unit here would be the same defect over
+    // again from the other side: the player would leave short of what they paid
+    // for.
+    var want = Math.min(affordable, p.fuelMax - p.fuel);
+    p.fuel = p.fuel + want;
+    p.cash -= spend;
+    return { ok: true, partial: true, cost: spend };
   }
   p.fuel = p.fuelMax;
   p.cash -= cost;

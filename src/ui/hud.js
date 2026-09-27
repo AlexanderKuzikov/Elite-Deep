@@ -61,6 +61,13 @@ export const HUD_LAYOUT = {
   smallFont: 11,
   lineWidth: 1.4,
   crosshairSize: 14,
+  /**
+   * How many bars the status column draws. Exported and counted rather than
+   * written as a literal, because `drawIdent` positions itself below that
+   * column: the two are one measurement in two places, and a sixth bar must
+   * move the callsign down instead of drawing over it.
+   */
+  statusRows: 5,
   messageLifetime: 5.5,
   messageMax: 5,
   // How long a damage-direction arc stays on screen. Long enough to turn
@@ -96,8 +103,8 @@ const MONO = '"SF Mono", "Cascadia Mono", "DejaVu Sans Mono", Consolas, monospac
  * Draw the whole HUD. `state` is everything it needs to know:
  *
  *   { width, height, scannerRange, speed, throttle, fuel, maxFuel, shields,
- *     maxShields, energy, maxEnergy, hull, maxHull, heat, missiles, laser,
- *     cash, rank, cargoUsed, cargoMax, target, contacts, station, planet,
+ *     maxShields, energy, maxEnergy, hull, maxHull, heat, maxHeat, missiles,
+ *     laser, cooldown, cash, rank, cargoUsed, cargoMax, target, contacts,
  *     messages, alerts, attitude, radarMode }
  */
 export function drawHud(ctx, state) {
@@ -162,7 +169,14 @@ function drawCrosshair(ctx, state) {
   ctx.stroke();
 
   // A laser cooldown pip, so the player can read heat without the bar.
-  if (state.laserHot) {
+  //
+  // This used to be gated on `state.laserHot` - "heat is past the lock" -
+  // which is a static fact, not a clock. Once the laser locked out, the arcs
+  // stayed lit for as long as the guns stayed hot, so the pip told the player
+  // the gun was busy even when it would have fired. It reads the cooldown now:
+  // the pip is visible exactly while a shot would be refused for `cooldown`,
+  // and heat itself already has a bar in the status column.
+  if ((state.cooldown || 0) > 0) {
     ctx.strokeStyle = HUD_COLOURS.danger;
     ctx.beginPath();
     ctx.arc(cx, cy, s * 1.5, -0.6, 0.6);
@@ -420,8 +434,14 @@ function drawIdent(ctx, state) {
   ctx.fillStyle = HUD_COLOURS.ink;
 
   const x = w * 0.035;
+  // Directly under the status column. The offset is computed from the same
+  // five rows `drawStatusBars` draws and the same layout constants it uses,
+  // rather than from a literal `5`: the coupling used to be a bare number, so
+  // a sixth bar would have put the callsign on top of the cash readout and
+  // nothing anywhere would have failed.
   const y = h * 0.06
-    + 5 * (HUD_LAYOUT.barHeight * k + HUD_LAYOUT.barGap * k + HUD_LAYOUT.smallFont * k) + 6 * k;
+    + HUD_LAYOUT.statusRows * (HUD_LAYOUT.barHeight * k + HUD_LAYOUT.barGap * k + HUD_LAYOUT.smallFont * k)
+    + 6 * k;
 
   ctx.fillText((state.cash || 0).toFixed(1) + ' CR', x, y);
   ctx.fillStyle = HUD_COLOURS.inkDim;

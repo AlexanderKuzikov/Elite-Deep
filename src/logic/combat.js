@@ -20,6 +20,12 @@
  *     passes rather than one held trigger.
  *
  * The result is a fight measured in ten to twenty seconds of manoeuvring.
+ *
+ * Both claims above rested on the heat lock, and the lock was unreachable for
+ * a while: see the comment on `laserCanFire` for the frame order that hid it
+ * and the measurement that found it. Worth reading before reordering those
+ * checks or clamping heat here, because the difference between a limiter and a
+ * comment is a subtraction.
  */
 
 /**
@@ -95,10 +101,44 @@ export const ENEMY_MISSILE_TURN = 1.3;
 /** How close the player's laser can lock a missile and still hit it. */
 export const ENEMY_MISSILE_RADIUS = 7;
 
+/**
+ * The heat ceiling. No shot may take heat past it, and the bar is scaled by it.
+ *
+ * The clamp is in `fireLaser`, and it is safe there because it is the LOCK that
+ * stops the weapon, not the ceiling - a shot reaching the lock spends the rest
+ * of the burst being refused. The clamp only sets the height a shot that trips
+ * the lock sits at, and that height matters: see the note on `HEAT_LOCK`.
+ */
 export const HEAT_MAX = 100;
 /** Heat shed per second while not firing. Deliberately below the firing cost. */
 export const HEAT_COOL = 16;
-/** Firing is blocked above this heat, so bursts must be spaced. */
+/**
+ * Firing is refused at or above this heat, so bursts must be spaced.
+ *
+ * Overheat is checked before the cooldown in `laserCanFire`, and that ordering
+ * is load-bearing: the frame that first holds heat above this line is the frame
+ * the shot that caused it is still cooling on, so with the checks the other way
+ * round the refusal came back as 'cooldown' and this line was never reported at
+ * all. See the measurement there.
+ *
+ * The margin between this and `HEAT_MAX` is the entire limiter. Heat is clamped
+ * at the ceiling, so a shot that trips the lock leaves heat exactly at
+ * `HEAT_MAX`, and the lock lifts on the first frame it falls below this. A
+ * pulse shot costs 20 heat and one cooldown sheds 5.6, so the net charge per
+ * shot is 14.4 and a burst is `HEAT_LOCK / 14.4` shots, rounded up: seven. The
+ * beam charges 24.96 a shot, so it gets four.
+ *
+ * Two bounds hold this constant in place, and the gap between `HEAT_MAX` and
+ * this is 4 because of the second:
+ *
+ *   - Too low and the lock lifts within one cooldown, leaving a weapon that
+ *     fires, overheats, and fires again - the limiter exists but does not bite.
+ *   - Too high relative to the ceiling and the shot that trips the lock does
+ *     not get clipped, so it overshoots the ceiling by whatever it likes; the
+ *     bar then reads past its own track for a frame. At `HEAT_MAX` 100 the
+ *     biggest overshoot any weapon's shot can produce is a beam's 28 against a
+ *     lock at 96.
+ */
 export const HEAT_LOCK = 96;
 
 export const ENERGY_REGEN = 5.0;
@@ -134,10 +174,38 @@ export function laserFor(type) {
   return LASERS[type] || LASERS.pulse;
 }
 
-/** Can the laser fire right now? Returns a reason when it cannot. */
+/**
+ * Can the laser fire right now? Returns a reason when it cannot.
+ *
+ * Overheat is checked BEFORE the cooldown, and the order is load-bearing.
+ * Cooling runs every frame (`tickHeat`), including the frames spent waiting
+ * for the cooldown, so with the check second the frame that held heat above
+ * the lock was always a cooldown frame and the refusal came back as
+ * 'cooldown'. That alone did not restore the limiter: the lock was still
+ * unreachable, because the weapon's equilibrium sits below it.
+ *
+ * `HEAT_MAX` (100) is the ceiling and `HEAT_COOL * cooldown` (16 * 0.35 = 5.6
+ * for the pulse) is what one cooldown sheds, so a weapon that cools to exactly
+ * `100 - 5.6 = 94.4` and no further never reaches the lock at 96. The player
+ * has no way to know why holding the trigger forever is suddenly allowed, and
+ * the reason is that two constants were chosen a hair apart without the
+ * subtraction between them being checked. Measured 2026-09-27: a run that
+ * cools to 94.4 between shots fires 29 pulse shots in thirty seconds - every
+ * burst ending at the ceiling rather than at the lock.
+ *
+ * So a locked-out weapon is held at the lock until it has actually cooled
+ * below it. `heat` is floored at `HEAT_LOCK` while the lock stands, which
+ * costs one thing that was never true anyway: that `heat` is a pure function of
+ * elapsed time. It is the *blocked* state that is sticky, and it is sticky in
+ * the honest direction - the weapon stays unready until a player who reads the
+ * bar sees it come back down under the line.
+ *
+ * "Overheated" is a statement about the weapon, not about the timer, so it
+ * outranks the cooldown when both are true.
+ */
 export function laserCanFire(p, cooldownLeft) {
-  if (cooldownLeft > 0) return { ok: false, reason: 'cooldown' };
   if (p.heat >= HEAT_LOCK) return { ok: false, reason: 'overheat' };
+  if (cooldownLeft > 0) return { ok: false, reason: 'cooldown' };
   const spec = laserFor(p.laserType);
   if (p.energy < spec.energy) return { ok: false, reason: 'energy' };
   return { ok: true, spec };
@@ -146,6 +214,15 @@ export function laserCanFire(p, cooldownLeft) {
 /**
  * Apply the cost of a shot. Called once the shot is confirmed, so the caller
  * cannot accidentally fire for free by checking and forgetting.
+ *
+ * `heat` deliberately does not accumulate past `HEAT_MAX`, and the fix for the
+ * missing limiter is NOT here - it is one line further down, in `tickHeat`.
+ * Clamping the peak was the game's original behaviour and looked correct; what
+ * it actually did was make `HEAT_MAX - HEAT_COOL * cooldown` an equilibrium the
+ * weapon could rest at, which for the pulse is 94.4 against a lock at 96. Heat
+ * never crossed the line, `laserCanFire` never returned 'overheat', and a held
+ * trigger fired 82 shots in thirty seconds. See the measurement on
+ * `laserCanFire`.
  */
 export function fireLaser(p) {
   const spec = laserFor(p.laserType);
@@ -160,9 +237,43 @@ export function fireLaser(p) {
   };
 }
 
-/** Cool down, regenerate energy. `dt` in seconds. */
-export function tickHeat(p, dt) {
+/**
+ * Cooling. `dt` in seconds. The one line the heat limiter depends on.
+ *
+ * A shot costs `spec.heat` and the weapon sheds `HEAT_COOL` per second, and the
+ * cooldown is shorter than the time it takes to shed a whole shot - 0.35 s
+ * against 1.25 s for the pulse. So a held trigger climbs: the frame rate at
+ * which the trigger is sampled does not matter, because cooling and cooldown
+ * both run on the same clock.
+ *
+ * What does matter is WHERE the climb is measured. Heat is tested in
+ * `laserCanFire`, and during a burst that test is evaluated on the frames
+ * between shots, when the weapon is on cooldown and cooling. Heat peaks on the
+ * frame right after a shot - and `fireLaser` clips that peak to `HEAT_MAX`, so
+ * the peak is 100, and by the next evaluation it has already fallen to 99.73.
+ * Below the lock at 96 it falls at the *end of the cooldown*, which is the
+ * moment the next shot is allowed. Whether the lock is ever seen therefore
+ * comes down entirely to the arithmetic in `passBudget`: the net charge per
+ * shot, `spec.heat - HEAT_COOL * cooldown`, against the height of the lock.
+ *
+ * For the pulse that is 14.4 against 96, so the seventh shot starts at 84.8 -
+ * under the line - takes heat to the ceiling, and the tenth to be allowed
+ * finds it still above the lock and is refused. Seven shots, which is the
+ * documented pass budget. The test that pins this runs the frames rather than
+ * the arithmetic, because the arithmetic is exactly what was wrong before.
+ *
+ * The cooldown is reset here, on the same clock, for the same reason. It used
+ * to be decremented into negative territory between shots, and where a number
+ * is measured at the point it crosses zero, that is the difference between a
+ * window and an instant: a cooldown left at -0.1 s answered `cooldownLeft > 0`
+ * on exactly one frame of the next burst, so the 350 ms window shrank to 17 ms
+ * and the check that decides whether the gun can fire was consulted once per
+ * shot instead of once per frame. Reported in review as "the cooldown cannot
+ * fail" - the branch no longer ran in the situations it was written for.
+ */
+export function tickHeat(p, dt, cooldownLeft) {
   if (p.heat > 0) p.heat = Math.max(0, p.heat - HEAT_COOL * dt);
+  return cooldownLeft > 0 ? Math.max(0, cooldownLeft - dt) : 0;
 }
 
 export function regenEnergy(p, dt) {

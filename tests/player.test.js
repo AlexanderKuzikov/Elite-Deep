@@ -549,6 +549,64 @@ test('refuelling with an empty purse is refused', () => {
   assert.equal(p.fuel, 1, 'no fuel should have been given away');
 });
 
+test('no refuel can leave the purse negative, at any fuel level', () => {
+  // The bug this test exists for, found in review and reproduced on 2026-09-27:
+  // a commander with 1.9 CR and a tank one unit short bought that unit for 2.0
+  // and left with -0.10 CR. `affordable` was floored, and then the charge was
+  // the *ceiling* of the same product - so the price of the last unit was
+  // `Math.ceil` of what the purse could pay for it, which can never be less
+  // than the purse.
+  //
+  // It is not a cosmetic sign. `validateSave` lists `cash` among the numbers
+  // that must not be negative, so the game wrote a save it then refused to
+  // load, and the player's only route out was to start again. `missions.js`
+  // `failOutcome` shows the shape of the correct arithmetic: `min(fine,
+  // floor(cash))`.
+  //
+  // A grid rather than a single case, because the failure lived exactly on the
+  // boundary where the floor and the ceiling disagree - the two example purses
+  // in the review were 1.9 and 1.4, and anything above 2.0 was fine.
+  for (let fuel = 0; fuel <= 7; fuel += 0.5) {
+    for (let cash = 0; cash <= 12; cash = Math.round((cash + 0.1) * 10) / 10) {
+      const p = P.create();
+      p.fuel = fuel;
+      p.cash = cash;
+      const res = P.refuel(p);
+      assert.ok(p.cash >= 0,
+        'refuelling from ' + fuel + '/' + p.fuelMax + ' with ' + cash
+        + ' CR left the purse at ' + p.cash + ' CR (' + JSON.stringify(res) + ')');
+      assert.ok(p.fuel <= p.fuelMax,
+        'refuelling from ' + fuel + '/' + p.fuelMax + ' overfilled the tank to ' + p.fuel);
+      if (res.ok) {
+        assert.ok(p.cash <= cash, 'a refuel increased the purse');
+        assert.ok(res.cost <= cash,
+          'charged ' + res.cost + ' CR to a purse holding ' + cash + ' CR');
+      }
+    }
+  }
+});
+
+test('a partial refuel buys exactly what the purse pays for', () => {
+  // The other side of the same rounding: fuel must not be rounded up either, or
+  // the commander leaves with more fuel than they were charged for and the
+  // error just changes sign. 1.9 CR at 1.4 CR a unit buys one unit for 1.4.
+  const p = P.create();
+  p.fuel = 6;
+  p.cash = 1.9;
+  const res = P.refuel(p);
+  assert.equal(res.ok, true);
+  assert.equal(res.partial, true);
+  assert.equal(p.fuel, p.fuelMax, 'the tank had room for the unit that was paid for');
+  assert.equal(p.cash, 0.5, 'the charge should be what the purse could cover, not a whole unit');
+
+  const empty = P.create();
+  empty.fuel = 0;
+  empty.cash = 1.9;
+  P.refuel(empty);
+  assert.equal(empty.fuel, 1, 'one unit was paid for, so one unit should arrive');
+  assert.ok(empty.cash >= 0, 'the purse went negative buying a single unit');
+});
+
 // --- Rank ------------------------------------------------------------------
 
 test('the rank ladder is monotonic and starts at Harmless', () => {

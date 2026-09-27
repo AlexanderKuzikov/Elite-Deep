@@ -299,6 +299,50 @@ test('faction trade bias shifts prices in the documented direction', () => {
   assert.ok(fed > ali, 'Federation food (' + fed + ') should cost more than Alliance (' + ali + ')');
 });
 
+test('a surplus makes a commodity cheaper and a shortage dearer', () => {
+  // The existing condition test above only covers FAMINE food, which is
+  // demand-driven - the demand term masks a wrong sign on supply, so it passed
+  // for the whole life of the bug. Found in review and measured on 2026-09-27:
+  // `conditionFactor` ADDED the supply term, while the table in `factions.js`
+  // reads a positive supply as plenty and calls it cheap in its own note. Every
+  // surplus therefore raised the price, and the two conditions whose whole point
+  // is a glut of ore - BOOM and GOLD_RUSH - were the two that made minerals
+  // dearest (1.1429x and 1.2571x the stable price).
+  //
+  // So this asserts the direction for a supply-only effect, on both sides of
+  // zero: a positive supply lowers the price, a negative one raises it.
+  const sys = {
+    profile: { produces: {}, consumes: {}, speciality: 'minerals', lacking: 'alloys' },
+    tech: 12, population: 5, productivity: 50, marketSalt: 12345, faction: 'INDEPENDENT',
+  };
+  const price = (condition, com) => E.computeMarket(
+    Object.assign({}, sys, { condition }), 0, 0,
+  ).find(r => r.com.id === com).price;
+
+  // BOOM supplies minerals (0.3, positive = plenty). GOLD_RUSH supplies more.
+  const boomMinerals = price('BOOM', 'minerals');
+  const rushMinerals = price('GOLD_RUSH', 'minerals');
+  const calmMinerals = price('STABLE', 'minerals');
+  assert.ok(boomMinerals < calmMinerals,
+    'BOOM minerals ' + boomMinerals + ' should be cheaper than stable ' + calmMinerals
+    + ' - the condition says ore is cheap');
+  assert.ok(rushMinerals < boomMinerals,
+    'GOLD_RUSH minerals ' + rushMinerals + ' should undercut BOOM ' + boomMinerals
+    + ' - it supplies more');
+
+  // PLAGUE supplies computers at -0.2, i.e. a shortage of them.
+  const plagueComputers = price('PLAGUE', 'computers');
+  const calmComputers = price('STABLE', 'computers');
+  assert.ok(plagueComputers > calmComputers,
+    'PLAGUE computers ' + plagueComputers + ' should exceed stable ' + calmComputers
+    + ' - the condition says supplies of them are short');
+
+  // And the demand side still works, so the two are not cancelling out.
+  const famineFood = price('FAMINE', 'food');
+  assert.ok(famineFood > calmMinerals,
+    'FAMINE food should be dear; got ' + famineFood);
+});
+
 test('condition shocks move prices in the documented direction', () => {
   const sys = {
     profile: { produces: {}, consumes: { food: 0.5 }, speciality: 'minerals', lacking: 'food' },

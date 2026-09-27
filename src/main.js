@@ -2381,7 +2381,15 @@ export function boot(host, options) {
     const alerts = [];
     if (player.fuel < 3) alerts.push({ text: 'LOW FUEL', urgent: true });
     if (player.hull / Math.max(1, player.hullMax) < 0.3) alerts.push({ text: 'HULL CRITICAL', urgent: true });
-    if (player.heat >= COMBAT.HEAT_LOCK) alerts.push({ text: 'LASER OVERHEATED', urgent: false });
+    // Deliberately not `player.heat >= HEAT_LOCK` alone: the heat peak sits
+    // just above the lock for one frame and then falls back, so a threshold
+    // test on heat announced a lockout that had already ended. The readout
+    // says the gun will not fire, and it says it exactly while `laserCanFire`
+    // refuses for that reason. Same verdict, same frame - two readouts of one
+    // fact drift apart the moment they each compute it.
+    if (COMBAT.laserCanFire(player, session.shotCooldown).reason === 'overheat') {
+      alerts.push({ text: 'LASER OVERHEATED', urgent: false });
+    }
     if (session.shots.length > 3) alerts.push({ text: 'INCOMING FIRE', urgent: true });
     // A missile outranks everything else on the screen: it is the one thing
     // that cannot be absorbed, and it is the one thing the player can shoot.
@@ -2421,7 +2429,7 @@ export function boot(host, options) {
       heat: player.heat, maxHeat: COMBAT.HEAT_MAX,
       missiles: player.missiles,
       laser: player.laserType,
-      laserHot: player.heat >= COMBAT.HEAT_LOCK,
+      cooldown: session.shotCooldown,
       cash: player.cash,
       rank: rank,
       cargoUsed: PLAYER.cargoUsed(player),
@@ -2471,11 +2479,15 @@ export function boot(host, options) {
     // Heat, energy and shields recover in every mode except death - a docked
     // ship should be cooling down, not staying hot because time is paused.
     if (session.mode !== MODE.DEAD) {
-      COMBAT.tickHeat(player, dt);
+      // The cooldown is returned rather than decremented here, and it is floored
+      // at zero inside. Left to run negative between shots it crossed zero in
+      // the middle of a step, so the "still cooling" branch was taken on a
+      // single frame of the next burst - a 350 ms window that read as 17 ms to
+      // everything checking it per frame. See `tickHeat`.
+      session.shotCooldown = COMBAT.tickHeat(player, dt, session.shotCooldown);
       COMBAT.regenEnergy(player, dt);
       session.sinceDamage += dt;
       COMBAT.regenShields(player, dt, session.sinceDamage);
-      session.shotCooldown = Math.max(0, session.shotCooldown - dt);
     }
 
     switch (session.mode) {

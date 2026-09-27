@@ -377,7 +377,7 @@ function fullState() {
     energy: 80, maxEnergy: 100,
     hull: 90, maxHull: 100,
     heat: 12, maxHeat: 100,
-    missiles: 2, laser: 'pulse', laserHot: false,
+    missiles: 2, laser: 'pulse', cooldown: 0,
     cash: 412.5, rank: 'mostly harmless',
     cargoUsed: 8, cargoMax: 20,
     target: {
@@ -728,6 +728,73 @@ test('the urgent alerts are outlined too', () => {
       '"' + order[i].args[0] + '" was filled with no outline under it');
     assert.equal(order[i + 1].name, 'fillText');
   }
+});
+
+// --- The crosshair pip tracks the clock, not the heat -----------------------
+
+/**
+ * The arcs the crosshair draws, told apart from every other arc on the screen.
+ *
+ * The cooldown pip is a single short arc at `s * 1.5` from the centre, and
+ * nothing else is drawn at that radius. Counting `arc` calls would be useless
+ * here: the scanner, the target ring and the damage arcs all draw their own.
+ */
+function crosshairArcCount(ctx) {
+  const s = H.HUD_LAYOUT.crosshairSize * (HGT / H.HUD_LAYOUT.referenceHeight);
+  return ctx.calls.filter((c) => c.name === 'arc' && Math.abs(c.args[2] - s * 1.5) < 1e-9).length;
+}
+
+test('the crosshair pip follows the cooldown, not the heat', () => {
+  // The pip used to be gated on "heat is past the lock". Heat is a level, not
+  // a clock: once the laser locked out, the pip stayed lit for as long as the
+  // guns stayed hot - including the frames where the laser would in fact have
+  // fired. It reads the cooldown now, which is exactly the condition
+  // `laserCanFire` refuses shots for.
+  const hot = recordingContext();
+  H.drawHud(hot, { width: W, height: HGT, heat: 99, maxHeat: 100, cooldown: 0 });
+  assert.equal(crosshairArcCount(hot), 0,
+    'a shot was refused for nothing: the pip is lit with no cooldown left');
+
+  const cooling = recordingContext();
+  H.drawHud(cooling, { width: W, height: HGT, heat: 0, maxHeat: 100, cooldown: 0.2 });
+  assert.equal(crosshairArcCount(cooling), 1,
+    'the pip is dark while the laser is still recharging');
+});
+
+test('the crosshair pip is gone once the cooldown runs out', () => {
+  // The other half of the same bug: a pip that lingers past the cooldown
+  // reports a gun that is busy when it is not.
+  const ctx = recordingContext();
+  H.drawHud(ctx, { width: W, height: HGT, heat: 0, maxHeat: 100, cooldown: 0 });
+  assert.equal(crosshairArcCount(ctx), 0, 'the pip outlived the cooldown');
+});
+
+// --- The callsign sits below the status column, wherever that column ends ---
+
+test('the ident readout clears the status column by construction', () => {
+  // The offset used to be a literal `5` that mirrored the five entries in
+  // `drawStatusBars`'s `rows` array with nothing tying the two together: a
+  // sixth bar would have drawn the callsign on top of the cash readout, and
+  // no test, lint rule or runtime warning would have noticed. The height is
+  // now the same expression from the same constant, so this asserts the
+  // constant rather than a number, and the assertion is the coupling.
+  assert.ok(H.HUD_LAYOUT.statusRows >= 5, 'the status column lost a bar');
+
+  const k = HGT / H.HUD_LAYOUT.referenceHeight;
+  const rowPitch = H.HUD_LAYOUT.barHeight * k + H.HUD_LAYOUT.barGap * k
+    + H.HUD_LAYOUT.smallFont * k;
+  const lastRowTop = HGT * 0.06 + (H.HUD_LAYOUT.statusRows - 1) * rowPitch;
+  const lastRowBottom = lastRowTop + H.HUD_LAYOUT.barHeight * k;
+
+  const ctx = recordingContext();
+  const state = fullState();
+  H.drawHud(ctx, state);
+  const cash = ctx.calls.find((c) => c.name === 'fillText'
+    && String(c.args[0]).endsWith(' CR'));
+  assert.ok(cash, 'the cash readout was not drawn');
+  assert.ok(cash.args[2] > lastRowBottom,
+    'the callsign is drawn at y=' + cash.args[2].toFixed(1)
+    + ', inside the status column, which ends at ' + lastRowBottom.toFixed(1));
 });
 
 // --- Every key the HUD promises is really bound -----------------------------

@@ -125,13 +125,28 @@ function profileFactor(sys, comId) {
  * condition contributes one number, and it is softer when the profile
  * already explains the price - a blockade on a world that was already
  * starving should not be cubed into a fortune.
+ *
+ * The supply term is SUBTRACTED, and the sign is not cosmetic. The condition
+ * table in `factions.js` reads a positive supply as plenty and a negative one
+ * as shortage - `BOOM` lists `minerals: 0.3` and calls ore cheap in its own
+ * note, `FAMINE` lists `food: -0.6` and calls the world desperate for it. With
+ * the term added, every one of those tables inverted: measured 2026-09-27 on a
+ * fixed salt, BOOM minerals came out at 1.1429x the STABLE price and GOLD_RUSH
+ * minerals at 1.2571x, so the two conditions whose whole point is a glut of ore
+ * were the two that made it dearest. Famine food and plague medicine are
+ * demand-driven and were masked by the demand term, which is why the two
+ * examples in review were the only visible ones.
+ *
+ * Both terms are now read the same way round: `demand` positive raises the
+ * price, `supply` positive lowers it. A negative supply therefore reads as a
+ * shortage and raises it, which is what `FAMINE`'s `food: -0.6` means.
  */
 function conditionFactor(sys, comId) {
   var cond = F.condition(sys.condition);
   var demand = cond.demand[comId] || 0;
   var supply = cond.supply[comId] || 0;
   // Bias is the background effect; demand/supply are commodity-specific.
-  var mul = 1 + cond.priceBias * 0.5 + demand * 0.55 + supply * 0.4;
+  var mul = 1 + cond.priceBias * 0.5 + demand * 0.55 - supply * 0.4;
   return Math.max(0.45, Math.min(1.75, mul));
 }
 
