@@ -19,7 +19,21 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as H from '../src/ui/hud.js';
 
-const FOV = Math.PI / 3;
+/**
+ * The field of view, in **degrees** - the unit the game actually passes.
+ *
+ * This constant used to be `Math.PI / 3`, radians, while `main.js` passed
+ * `CAMERA.fov` = 74, degrees. Two callers, two conventions, and the projection
+ * honoured neither: it computed `tan(fov / 2)` straight on whatever it was
+ * given, so the real game ran with `tan(37) = -0.8408` and a focal length of
+ * **-523 px** - every target box and tracer mirrored and scaled by -0.8963.
+ * These tests could not see it, because a radian value happens to make that
+ * same broken formula come out positive: `tan(pi/6) = 0.5774`.
+ *
+ * So the tests now speak the caller's unit. A test that agrees with the bug is
+ * worse than no test, and this one did for as long as the bug lived.
+ */
+const FOV = 74;
 const W = 1600;
 const HGT = 900;
 
@@ -107,9 +121,32 @@ test('a closer target gets a bigger on-screen size', () => {
 
 test('screen position scales with the field of view', () => {
   // A narrower FOV magnifies: the same offset pushes further from centre.
-  const wide = H.projectToScreen({ x: 200, y: 0, z: 500 }, ORIGIN, LEVEL_BASIS, W, HGT, Math.PI / 2.5);
-  const narrow = H.projectToScreen({ x: 200, y: 0, z: 500 }, ORIGIN, LEVEL_BASIS, W, HGT, Math.PI / 5);
+  const wide = H.projectToScreen({ x: 200, y: 0, z: 500 }, ORIGIN, LEVEL_BASIS, W, HGT, 90);
+  const narrow = H.projectToScreen({ x: 200, y: 0, z: 500 }, ORIGIN, LEVEL_BASIS, W, HGT, 40);
   assert.ok(narrow.x > wide.x, 'a narrower FOV should magnify the offset');
+});
+
+test('the projection magnifies by exactly the focal length the camera implies', () => {
+  // A relationship-only assertion is what let a focal length of -523 px live
+  // in the shipped game: it held for the sign error, the radian/degree mixup
+  // and a plain off-by-a-factor. Pin the number instead.
+  //
+  //   focal = (height / 2) / tan(fov / 2)
+  //
+  // and a point offset `d` to the right at depth `z` lands
+  // `dFocal / z` px from the centre. Both come from the same formula three.js
+  // uses to build the perspective matrix, so they cannot drift apart from it.
+  const measured = H.projectToScreen({ x: 200, y: 0, z: 500 }, ORIGIN, LEVEL_BASIS, W, HGT, FOV);
+  const focal = HGT / 2 / Math.tan((FOV * Math.PI) / 180 / 2);
+  assert.ok(Math.abs(measured.x - (W / 2 + (200 * focal) / 500)) < 1e-6,
+    'screen x should be width/2 + x*focal/depth, got ' + measured.x);
+
+  // At the shipped FOV and a 900 px viewport that is 597.17 px: 450 / tan(37
+  // degrees). Written as a literal on purpose: a formula recomputed in the test
+  // would agree with a broken formula in the source, which is the trap this
+  // test exists to avoid. Tolerances are tight because both quantities are
+  // exact - nothing here is sampled or rounded.
+  assert.ok(Math.abs(focal - 597.17) < 0.01, 'the shipped focal length moved: ' + focal);
 });
 
 test('an off-centre target projects symmetrically for left and right', () => {

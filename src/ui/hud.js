@@ -1034,6 +1034,17 @@ function clamp(v, lo, hi) {
  * Kept here rather than in the renderer because the HUD needs it for target
  * boxes and the lead pip, and duplicating the projection is how target boxes
  * end up drawn a few pixels off.
+ *
+ * `fov` is in **degrees**, matching `RENDER.CAMERA.fov` and the value
+ * `THREE.PerspectiveCamera` is given - which is the whole point of this note.
+ * The tangent below used to be taken of the raw value, so a 74-degree field
+ * produced `Math.tan(37)` instead of `Math.tan(0.6458)`. That is not a small
+ * error: `tan(37) = -0.8408`, so the focal length came out **negative**
+ * (-523 px instead of +584 px) and every projected element was mirrored and
+ * scaled by -0.90. Target boxes, contact markers and laser tracers were all
+ * drawn on the wrong side of the screen, and the further from the centre the
+ * worse it got. Nothing caught it because the projection is only ever used to
+ * place decorations - the 3D scene itself never reads it.
  */
 export function projectToScreen(world, cameraPos, basis, width, height, fov) {
   const dx = world.x - cameraPos.x;
@@ -1047,7 +1058,8 @@ export function projectToScreen(world, cameraPos, basis, width, height, fov) {
 
   if (f <= 0.001) return null; // behind the camera
 
-  const focal = (height / 2) / Math.tan(fov / 2);
+  const half = (fov * Math.PI) / 180 / 2;
+  const focal = (height / 2) / Math.tan(half);
   return {
     x: width / 2 + (r / f) * focal,
     y: height / 2 - (u / f) * focal,
