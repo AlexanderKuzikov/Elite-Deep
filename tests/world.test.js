@@ -136,6 +136,123 @@ test('traffic spawns in a shell around the station, not on top of it', () => {
   }
 });
 
+test('hostiles do not spawn inside the safe zone', () => {
+  // The launch port is the one place the player has no information and no
+  // skill yet. The old shell started at 420, so a hostile could spawn close
+  // enough to be in your face before the launch clamp had released - measured
+  // on the shipped build, four hostiles and a missile in flight seven seconds
+  // after undock.
+  //
+  // Sampled across seeds and across a dangerous system, because the point is
+  // that the spawn *table* cannot sneak one in, not that one seed happens to
+  // be quiet. Traders and patrols are still allowed close: only a ship that
+  // would start a fight is kept out.
+  //
+  // Note what is *not* asserted: that a hostile spawns outside `FIRE_RANGE`.
+  // The bubble is deliberately smaller than the gun's reach (400 against 620),
+  // because a bubble big enough to cover the gun swallows the missile window
+  // and turns the game quiet rather than safe. What covers a hostile that
+  // spawned in gun range is the launch grace, and that is tested in `main`.
+  //
+  // The bubble is measured from the player, so `spawn` has to be told where
+  // the player is; `topUp` is the path that carries it. A player at the origin
+  // is the hardest case, since the origin is the station.
+  const wild = { ...home, gov: 0, faction: 3, condition: 0, profile: home.profile };
+  for (let seed = 0; seed < 60; seed += 1) {
+    const t = W.createTraffic(new THREE.Group(), wild, seed);
+    const player = { x: 0, y: 0, z: 0 };
+    for (let i = 0; i < 40; i += 1) t.spawn(null, false, player);
+    for (const s of t.ships) {
+      if (!s.hostile) continue;
+      const d = Math.hypot(
+        s.mesh.position.x - player.x,
+        s.mesh.position.y - player.y,
+        s.mesh.position.z - player.z,
+      );
+      assert.ok(d >= W.SAFE_ZONE.radius,
+        'seed ' + seed + ': a hostile spawned at ' + d.toFixed(0)
+        + ', inside the ' + W.SAFE_ZONE.radius + ' safe zone');
+    }
+  }
+});
+
+test('a hostile already inside the zone breaks off instead of engaging', () => {
+  // Spawn placement alone is not enough: a ship that was there first, or one
+  // the commander flew at, has to stop being a threat too. It is held off, not
+  // deleted and not disarmed - fly out past the bubble and it comes back.
+  const t = W.createTraffic(new THREE.Group(), home, 7);
+  t.topUp();
+  // Put a hostile just inside the bubble, nose on the player, in range.
+  const pirate = t.spawn('pirate');
+  pirate.hostile = true;
+  pirate.aggression = 1;
+  // The bubble is measured from the player, so the player has to stand
+  // somewhere for "inside the bubble" to mean anything. Place it 100 units
+  // short of the boundary, on the far side of the player.
+  const insideAt = W.SAFE_ZONE.radius - 100;
+  pirate.mesh.position.set(insideAt, 0, 0);
+  const playerPos = { x: 0, y: 0, z: 0 };
+
+  W.stepTraffic(t, { vel: { x: 0, y: 0, z: 0 } }, playerPos, 1 / 60, {
+    onEnemyShot() { throw new Error('a held-off hostile opened fire inside the zone'); },
+    onEnemyMissile() { throw new Error('a held-off hostile launched inside the zone'); },
+  });
+  assert.equal(pirate.state, 'patrol', 'a hostile inside the zone chose to engage');
+
+  // And it must actually back away from the *player*, not sit on the
+  // boundary. Distance is measured to the player, because that is where the
+  // bubble is centred.
+  const fromPlayer = () => Math.hypot(
+    pirate.mesh.position.x - playerPos.x,
+    pirate.mesh.position.y - playerPos.y,
+    pirate.mesh.position.z - playerPos.z,
+  );
+  const before = fromPlayer();
+  let shotsWhileInside = 0;
+  for (let i = 0; i < 240; i += 1) {
+    W.stepTraffic(t, { vel: { x: 0, y: 0, z: 0 } }, playerPos, 1 / 60, {
+      // The claim is that it does not fire *while inside the bubble*, not that
+      // it never fires again: once it has backed off past the boundary it is
+      // an ordinary hostile and is supposed to shoot. Asserting silence for
+      // the whole run would have been asserting that fleeing never ends.
+      onEnemyShot(s) {
+        if (s === pirate && fromPlayer() < W.SAFE_ZONE.radius) shotsWhileInside += 1;
+      },
+      onEnemyMissile(s) {
+        if (s === pirate && fromPlayer() < W.SAFE_ZONE.radius) shotsWhileInside += 1;
+      },
+    });
+  }
+  const after = fromPlayer();
+  assert.equal(shotsWhileInside, 0,
+    'the held-off hostile fired ' + shotsWhileInside + ' time(s) while inside the zone');
+  assert.ok(after > before, 'the held-off hostile did not steer away: '
+    + before.toFixed(0) + ' -> ' + after.toFixed(0));
+});
+
+test('a hostile outside the zone still fights', () => {
+  // The other half of the contract: the zone must not have disarmed the game.
+  // The same ship, moved past the boundary, has to engage.
+  //
+  // Separation, not coordinates, is what matters: `radius + 400` for the ship
+  // and `radius + 200` for the player put them 200 apart, which is *inside*
+  // the bubble the test was trying to get out of. The player stands at the
+  // origin of the fight and the ship is placed a full radius-plus away from
+  // them.
+  const t = W.createTraffic(new THREE.Group(), home, 7);
+  const pirate = t.spawn('pirate');
+  pirate.hostile = true;
+  pirate.aggression = 1;
+  const player = { x: 0, y: 0, z: 0 };
+  pirate.mesh.position.set(W.SAFE_ZONE.radius + 400, 0, 0);
+  pirate.mesh.lookAt(0, 0, 0);
+  W.stepTraffic(t, { vel: { x: 0, y: 0, z: 0 } }, player, 1 / 60, {
+    onEnemyShot() {}, onEnemyMissile() {},
+  });
+  assert.equal(pirate.state, 'engage',
+    'a hostile outside the zone refused to fight, so the zone became a difficulty switch');
+});
+
 test('traffic prunes ships that drift out of range', () => {
   const parent = new THREE.Group();
   const traffic = W.createTraffic(parent, home, 3);
@@ -311,47 +428,56 @@ test('ships fly nose-first along their own nose vector', () => {
 });
 
 test('a hostile closes on the player when in range', () => {
+  // Fought outside the station's safe zone on purpose. These tests used to run
+  // the whole duel at the origin - which is where the *station* is - so they
+  // were exercising combat inside the launch bubble. Moving the fight out is
+  // the correction, not a relaxation: what is asserted (a hostile closes) is
+  // unchanged, and `SAFE_ZONE` has its own tests for the bubble itself.
+  const away = 3000;
   const traffic = W.createTraffic(new THREE.Group(), home, 55);
   const s = traffic.spawn('pirate');
   s.aggression = 1;
-  s.mesh.position.set(0, 0, 500);
-  s.mesh.lookAt(0, 0, 0);
-  const player = { x: 0, y: 0, z: 0 };
-  const before = Math.hypot(s.mesh.position.x, s.mesh.position.y, s.mesh.position.z);
+  s.mesh.position.set(0, 0, away / 2 + 500 + W.SAFE_ZONE.radius);
+  s.mesh.lookAt(0, 0, away / 2);
+  const player = { x: 0, y: 0, z: away / 2 };
+  const before = Math.hypot(s.mesh.position.x, s.mesh.position.y, s.mesh.position.z - away / 2);
   for (let i = 0; i < 240; i += 1) {
     W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, player, 1 / 60, { onEnemyShot() {} });
   }
-  const after = Math.hypot(s.mesh.position.x, s.mesh.position.y, s.mesh.position.z);
+  const after = Math.hypot(s.mesh.position.x, s.mesh.position.y, s.mesh.position.z - away / 2);
   assert.ok(after < before, 'the hostile did not close: ' + before + ' -> ' + after);
 });
 
 test('a hostile only shoots when roughly pointed at the player', () => {
+  // Outside the safe zone again: see the note on the closing test above.
+  const away = 3000;
   const traffic = W.createTraffic(new THREE.Group(), home, 77);
   const s = traffic.spawn('pirate');
   s.aggression = 1;
   s.canFire = 0;
-  s.mesh.position.set(0, 0, 300);
+  s.mesh.position.set(0, 0, away / 2 + 300 + W.SAFE_ZONE.radius);
   // Point it away from the player.
-  s.mesh.lookAt(0, 0, 1000);
+  s.mesh.lookAt(0, 0, away / 2 + 3000 + W.SAFE_ZONE.radius);
   let shots = 0;
   for (let i = 0; i < 120; i += 1) {
-    W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: 0 }, 1 / 60,
+    W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: away / 2 }, 1 / 60,
       { onEnemyShot() { shots += 1; } });
   }
   assert.equal(shots, 0, 'a ship shot the player while facing away');
 });
 
 test('a hostile does shoot once it has turned onto the player', () => {
+  const away = 3000;
   const traffic = W.createTraffic(new THREE.Group(), home, 78);
   const s = traffic.spawn('pirate');
   s.aggression = 1;
   s.canFire = 0;
   s.turnRate = 4; // let it snap around quickly for the purposes of the test
-  s.mesh.position.set(0, 0, 300);
-  s.mesh.lookAt(0, 0, 0);
+  s.mesh.position.set(0, 0, away / 2 + 300 + W.SAFE_ZONE.radius);
+  s.mesh.lookAt(0, 0, away / 2);
   let shots = 0;
   for (let i = 0; i < 600; i += 1) {
-    W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: 0 }, 1 / 60,
+    W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: away / 2 }, 1 / 60,
       { onEnemyShot() { shots += 1; } });
   }
   assert.ok(shots > 0, 'a pirate sat on the player nose for 10s and never fired');
@@ -612,10 +738,13 @@ test('enemy shot damage scales with the ship, not the system', () => {
     const traffic = W.createTraffic(new THREE.Group(), sys, 500);
     const s = traffic.spawn('pirate');
     s.aggression = 1; s.canFire = 0; s.turnRate = 6;
-    s.mesh.position.set(0, 0, 200);
-    s.mesh.lookAt(0, 0, 0);
+    // Outside the station's safe zone - combat at the origin was combat at the
+    // station, which is no longer a thing that happens.
+    const away = 3000;
+    s.mesh.position.set(0, 0, away + 200);
+    s.mesh.lookAt(0, 0, away);
     for (let i = 0; i < 600; i += 1) {
-      W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: 0 }, 1 / 60,
+      W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: away }, 1 / 60,
         { onEnemyShot(_s, shot) { seen.add(shot.damage); } });
     }
   }
@@ -1427,37 +1556,42 @@ test('a fight in progress draws nearby raiders in', () => {
   // Without this, three pirates in range take turns duelling the player one at
   // a time while the other two fly their patrol, which reads as a bug rather
   // than as mercy.
+  const away = 3000;
   const traffic = W.createTraffic(new THREE.Group(), home, 405);
   const leader = traffic.spawn('pirate');
-  leader.mesh.position.set(0, 0, 300);
+  leader.mesh.position.set(0, 0, away + 500);
   leader.state = 'engage';
   leader.aggression = 1;
 
   const bystander = traffic.spawn('pirate');
-  bystander.mesh.position.set(60, 0, 320);
+  bystander.mesh.position.set(60, 0, away + 520);
   bystander.state = 'patrol';
   bystander.aggression = 0;          // it would rather not fight
   bystander.hostile = true;
 
-  W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: 0 }, 1 / 60,
+  W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: away }, 1 / 60,
     { onEnemyShot() {} });
   assert.equal(bystander.state, 'engage', 'a nearby raider ignored a fight in progress');
 });
 
 test('a raider too far away is not drawn in', () => {
+  // Moved clear of the safe zone: inside it every hostile stays patrolling, so
+  // the assertion below would pass for the wrong reason and the pack radius
+  // would stop being tested at all.
+  const away = 3000;
   const traffic = W.createTraffic(new THREE.Group(), home, 406);
   const leader = traffic.spawn('pirate');
-  leader.mesh.position.set(0, 0, 200);
+  leader.mesh.position.set(0, 0, away + 500);
   leader.state = 'engage';
   leader.aggression = 1;
 
   const distant = traffic.spawn('pirate');
-  distant.mesh.position.set(0, 0, 200 + W.MORALE.joinRadius * 2);
+  distant.mesh.position.set(0, 0, away + 200 + W.MORALE.joinRadius * 2);
   distant.state = 'patrol';
   distant.aggression = 0;
   distant.hostile = true;
 
-  W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: 0 }, 1 / 60,
+  W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: away }, 1 / 60,
     { onEnemyShot() {} });
   assert.notEqual(distant.state, 'engage', 'the pack response reached too far');
 });
@@ -1467,7 +1601,9 @@ test('traders are never drawn into a fight', () => {
   // the lanes far more dangerous than the brief asks for.
   const traffic = W.createTraffic(new THREE.Group(), home, 407);
   const leader = traffic.spawn('pirate');
-  leader.mesh.position.set(0, 0, 300);
+  // 500 from the player, clear of the bubble: inside it nothing engages, so
+  // the claim ("a trader is not drawn in") would pass for the wrong reason.
+  leader.mesh.position.set(0, 0, 500);
   leader.state = 'engage';
   leader.aggression = 1;
 
@@ -1525,7 +1661,31 @@ function fireFrame(traffic, playerPos) {
   return launched;
 }
 
-/** A pirate lined up on the player, ready to launch. */
+/**
+ * Where combat is staged.
+ *
+ * A fixed distance, deliberately *not* derived from `SAFE_ZONE.radius`: the
+ * bubble decides where a fight may start, and these tests are about what
+ * happens once one has. Tying the staging point to the radius made every
+ * combat distance move whenever the bubble was tuned, which is how a test
+ * suite stops testing anything. 3000 keeps the whole exercise far from the
+ * station, and all combat distances are measured from the player anyway.
+ */
+const AWAY = 3000;
+
+/**
+ * A pirate lined up on the player, ready to launch, at exactly `distance`.
+ *
+ * Placed *behind* the player on the z axis with an unrotated nose, which is
+ * the arrangement the missile and gun branches both expect: `+Z` is ahead of
+ * a ship that has not been turned, so a pirate sitting at a greater z than the
+ * player and looking down `+Z`... is looking away. The nose is therefore
+ * flipped to face back down the axis toward the commander, and the placement
+ * is on the far side so the separation still equals `distance` - the bubble is
+ * measured from the player, so a pirate placed *between* player and station
+ * would be disarmed by it and a "distance 500" duel would silently test
+ * nothing.
+ */
 function loadedPirate(seed, kind, distance) {
   const traffic = W.createTraffic(new THREE.Group(), home, seed);
   const ship = traffic.spawn(kind || 'pirate');
@@ -1533,9 +1693,14 @@ function loadedPirate(seed, kind, distance) {
   ship.aggression = 1;
   ship.missileCooldown = 0;
   // Dead ahead of the player, nose toward them, at the given range.
-  ship.mesh.position.set(0, 0, -distance);
-  ship.mesh.quaternion.set(0, 0, 0, 1);
+  ship.mesh.position.set(0, 0, AWAY + distance);
+  ship.mesh.lookAt(0, 0, AWAY);
   return { traffic, ship };
+}
+
+/** Where the player stands while `loadedPirate` ships shoot at them. */
+function playerAtTheFight() {
+  return { x: 0, y: 0, z: AWAY };
 }
 
 test('a pirate in the launch window fires a missile', () => {
@@ -1543,7 +1708,7 @@ test('a pirate in the launch window fires a missile', () => {
   // which made the one attack you have to *answer* rather than absorb a
   // one-way street.
   const { traffic, ship } = loadedPirate(501, 'pirate', 500);
-  const launched = fireFrame(traffic, { x: 0, y: 0, z: 0 });
+  const launched = fireFrame(traffic, playerAtTheFight());
   assert.equal(launched.length, 1, 'no missile was launched');
   assert.equal(launched[0].entity, ship);
   assert.ok(launched[0].spec.damage > 0, 'the missile does no damage');
@@ -1555,21 +1720,21 @@ test('launching spends a missile from a small magazine', () => {
   const { traffic, ship } = loadedPirate(502, 'pirate', 500);
   const before = ship.missiles;
   assert.ok(before > 0, 'a pirate should carry at least one missile');
-  fireFrame(traffic, { x: 0, y: 0, z: 0 });
+  fireFrame(traffic, playerAtTheFight());
   assert.equal(ship.missiles, before - 1, 'the magazine was not spent');
 });
 
 test('an empty magazine cannot fire again', () => {
   const { traffic, ship } = loadedPirate(503, 'pirate', 500);
   ship.missiles = 0;
-  assert.equal(fireFrame(traffic, { x: 0, y: 0, z: 0 }).length, 0, 'fired with no missiles');
+  assert.equal(fireFrame(traffic, playerAtTheFight()).length, 0, 'fired with no missiles');
 });
 
 test('the cooldown stops a ship firing twice in a row', () => {
   // Without it a raider with two missiles empties both in two frames.
   const { traffic, ship } = loadedPirate(504, 'raider', 500);
-  assert.equal(fireFrame(traffic, { x: 0, y: 0, z: 0 }).length, 1);
-  assert.equal(fireFrame(traffic, { x: 0, y: 0, z: 0 }).length, 0,
+  assert.equal(fireFrame(traffic, playerAtTheFight()).length, 1);
+  assert.equal(fireFrame(traffic, playerAtTheFight()).length, 0,
     'a second missile went out on the next frame');
   assert.ok(ship.missileCooldown > 5, 'the cooldown is too short to matter');
 });
@@ -1578,13 +1743,13 @@ test('a missile is not launched from point blank', () => {
   // At knife range the missile is a formality, and the player has no room to
   // evade it. That is what the gun is for.
   const { traffic } = loadedPirate(505, 'pirate', 120);
-  assert.equal(fireFrame(traffic, { x: 0, y: 0, z: 0 }).length, 0,
+  assert.equal(fireFrame(traffic, playerAtTheFight()).length, 0,
     'a missile was launched at point blank range');
 });
 
 test('a missile is not launched from across the system', () => {
   const { traffic } = loadedPirate(506, 'pirate', 1400);
-  assert.equal(fireFrame(traffic, { x: 0, y: 0, z: 0 }).length, 0,
+  assert.equal(fireFrame(traffic, playerAtTheFight()).length, 0,
     'a missile was launched from outside its range');
 });
 
@@ -1596,10 +1761,10 @@ test('a missile needs a lock, not just proximity', () => {
   const ship = traffic.spawn('pirate');
   ship.state = 'engage';
   ship.missileCooldown = 0;
-  ship.mesh.position.set(0, 0, -500);
+  ship.mesh.position.set(0, 0, AWAY + 500);
   // Nose pointing ninety degrees away from the player.
   ship.mesh.quaternion.set(0, Math.sin(Math.PI / 4), 0, Math.cos(Math.PI / 4));
-  assert.equal(fireFrame(traffic, { x: 0, y: 0, z: 0 }).length, 0,
+  assert.equal(fireFrame(traffic, playerAtTheFight()).length, 0,
     'a missile was launched with no lock');
 });
 
@@ -1607,8 +1772,46 @@ test('a ship that has broken off does not launch', () => {
   // Firing on the way out is not fleeing.
   const { traffic, ship } = loadedPirate(508, 'pirate', 500);
   ship.fleeing = true;
-  assert.equal(fireFrame(traffic, { x: 0, y: 0, z: 0 }).length, 0,
+  assert.equal(fireFrame(traffic, playerAtTheFight()).length, 0,
     'a fleeing ship fired a missile');
+});
+
+test('nothing fires while the commander is under launch grace', () => {
+  // Grace used to live only in `hurtPlayer`, which meant an enemy could launch
+  // at a ship that would not take the damage. Measured on the shipped build:
+  // the first missile left the rail at 4.3 s with grace still at 3.5, so the
+  // commander watched an attack do nothing. That reads as broken, not as safe.
+  const { traffic, ship } = loadedPirate(512, 'pirate', 500);
+  ship.canFire = 0;
+  ship.missileCooldown = 0;
+  const player = playerAtTheFight();
+
+  /** One frame with grace at the given value, collecting shots and launches. */
+  const frame = (grace) => {
+    const out = { shots: 0, missiles: 0 };
+    W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 }, grace }, player, 1 / 60, {
+      onEnemyShot() { out.shots += 1; },
+      onEnemyMissile() { out.missiles += 1; },
+    });
+    return out;
+  };
+
+  // Under grace: silent, both weapons. Several frames, because a missile has a
+  // cooldown and a single frame could pass by luck.
+  for (let i = 0; i < 30; i += 1) {
+    const r = frame(3.5);
+    assert.equal(r.shots, 0, 'a hostile fired while the commander was under grace');
+    assert.equal(r.missiles, 0, 'a hostile launched while the commander was under grace');
+  }
+
+  // With grace spent: it has to be allowed to shoot, or the gate has quietly
+  // disarmed the game and the test above would pass on a gun that never fires.
+  ship.canFire = 0;
+  ship.missileCooldown = 0;
+  ship.missiles = 1;
+  const hot = frame(0);
+  assert.ok(hot.shots + hot.missiles > 0,
+    'nothing fired even with grace spent, so grace is not what was being tested');
 });
 
 test('traders never carry missiles', () => {
@@ -1619,9 +1822,9 @@ test('traders never carry missiles', () => {
   assert.equal(trader.missiles, 0, 'a trader is carrying missiles');
   trader.state = 'engage';
   trader.missileCooldown = 0;
-  trader.mesh.position.set(0, 0, -500);
-  trader.mesh.quaternion.set(0, 0, 0, 1);
-  assert.equal(fireFrame(traffic, { x: 0, y: 0, z: 0 }).length, 0, 'a trader fired a missile');
+  trader.mesh.position.set(0, 0, AWAY + 500);
+  trader.mesh.lookAt(0, 0, AWAY);
+  assert.equal(fireFrame(traffic, playerAtTheFight()).length, 0, 'a trader fired a missile');
 });
 
 test('raiders carry more than pirates', () => {
@@ -1863,11 +2066,12 @@ test('the gun has a range, and it is the one combat declares', () => {
     ship.aggression = 1;
     ship.canFire = 0;
     ship.missiles = 0;
-    // Dead ahead, nose at the commander.
-    ship.mesh.position.set(0, 0, -distance);
-    ship.mesh.quaternion.set(0, 0, 0, 1);
+    // Dead ahead, nose at the commander. The fight is staged outside the
+    // station's safe zone, where the AI is allowed to shoot at all.
+    ship.mesh.position.set(0, 0, AWAY + distance);
+    ship.mesh.lookAt(0, 0, AWAY);
     let shots = 0;
-    W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: 0 }, 1 / 60,
+    W.stepTraffic(traffic, { vel: { x: 0, y: 0, z: 0 } }, { x: 0, y: 0, z: AWAY }, 1 / 60,
       { onEnemyShot() { shots += 1; }, onEnemyMissile() {} });
     return shots;
   };

@@ -95,6 +95,18 @@ const HYPERSPACE_DURATION = 2.6;
 const ARRIVAL_GRACE = 3.0;
 
 /**
+ * Seconds of invulnerability after leaving a station.
+ *
+ * Longer than `ARRIVAL_GRACE`, because the two moments are not the same job.
+ * Arriving by jump drops you at the edge of a system with the tunnel still
+ * fading; undocking puts you 360 units from the station you just read a screen
+ * in, with your ship pointed at open space and the mouse newly captured. Three
+ * seconds is enough to survive a jump; it is not enough to work out which way
+ * is up. Six is.
+ */
+const LAUNCH_GRACE = 6.0;
+
+/**
  * How long the mouse hint stays on screen once flight begins without a captured
  * pointer, in seconds.
  *
@@ -429,8 +441,8 @@ export function boot(host, options) {
     });
     // Spawn the opening traffic immediately: arriving in an empty system and
     // waiting six seconds for the first ship is a bad first impression.
-    session.traffic.topUp();
-    session.traffic.topUp();
+    session.traffic.topUp(session.flight.pos);
+    session.traffic.topUp(session.flight.pos);
 
     clearMissiles();
     clearIncoming();
@@ -541,6 +553,15 @@ export function boot(host, options) {
     // request. Everything that starts flying has to go through here for that
     // reason; a path that enters `flight` another way has no gesture to spend.
     if (!captureMouse()) showMouseHint();
+    // The launch bubble: leave the station and nobody shoots for a moment.
+    //
+    // A jump already granted `ARRIVAL_GRACE`, and undocking granted nothing -
+    // so the single moment when the commander knows least about their ship was
+    // the least protected in the game. Measured on the shipped build before
+    // this: seven seconds after undocking from Lave the sky held four
+    // hostiles and a missile in flight, while the arrival message was still
+    // saying there was nothing unusual to report.
+    session.grace = Math.max(session.grace, LAUNCH_GRACE);
     play('undock');
     say('Undocked from ' + session.system.name + ' Station');
   }
@@ -2572,7 +2593,7 @@ export function boot(host, options) {
     session.lastTrafficTopUp += dt;
     if (session.lastTrafficTopUp >= TRAFFIC_INTERVAL) {
       session.lastTrafficTopUp = 0;
-      session.traffic.topUp();
+      session.traffic.topUp(session.flight.pos);
       session.traffic.prune();
     }
     WORLD.stepTraffic(session.traffic, {
@@ -2584,6 +2605,10 @@ export function boot(host, options) {
       // patrols that do not wait to be provoked. The tier table has promised
       // this since it was written; nothing read it until now.
       hostilePatrols: REP.patrolHostile(player, session.system),
+      // Handed down so the traffic layer can hold its fire rather than firing
+      // into a commander the damage code will refuse to hurt. See the note on
+      // `playerGrace` in `world.js`.
+      grace: session.grace,
     }, session.flight.pos, dt, {
       onEnemyShot: onEnemyShot,
       onEnemyMissile: onEnemyMissile,

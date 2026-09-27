@@ -18,7 +18,9 @@
  *      wormhole / sun glare     <- hazard zone, hostile traffic
  *
  * Traffic spawns procedurally in a shell around the station and despawns when
- * it drifts too far, so the player is never alone but never overrun.
+ * it drifts too far. Hostiles are held outside `SAFE_ZONE` so that the moment
+ * the commander leaves the slot is not also the moment a fight starts: the
+ * player is never alone, but is also never jumped while still reading the HUD.
  */
 import * as THREE from 'three';
 import * as R from '../logic/rng.js';
@@ -76,6 +78,69 @@ export const LAYOUT = {
 export const POCKET = {
   maxExtra: 6,
   spawnOuter: 760,
+};
+
+/**
+ * The immediate volume around the player where nobody *starts* a fight.
+ *
+ * A commander undocking for the first time has no idea which way is up. The
+ * old behaviour spawned ordinary traffic - which in a merely average system
+ * is around a third hostiles - into a shell starting at `spawnShellInner`,
+ * while pirate laser range is `FIRE_RANGE` = 620. So a hostile could spawn
+ * already inside its own firing range and open up within seconds of the
+ * launch clamp releasing, in a system the arrival message described as
+ * uneventful. Measured on the shipped build: seven seconds after undocking
+ * from Lave Station there were four hostiles in the sky and a missile in
+ * flight.
+ *
+ * The fix is a *protect volume*, not a difficulty switch, because a difficulty
+ * switch in a sandbox is a lie: the ships are still there, still hostile, and
+ * still shoot - they simply will not start a fight while the commander is
+ * still in the bubble. A commander who wants a fight flies out and gets one.
+ *
+ * Measured from the **player**, not from the station. The first version
+ * anchored it to the origin, where the station is, and the player undocks at
+ * 360 units - so a hostile parked on the 700-unit boundary was already outside
+ * "the safe zone" while the player was still 340 units inside it. Measured on
+ * that version, seven seconds after undocking: four hostiles, two of them in
+ * `engage`, and a missile in flight. The bubble was protecting the station
+ * from the player's point of view and nobody else.
+ *
+ * **The radius cannot cover the gun, and pretending it does is the trap.**
+ * `FIRE_RANGE` is 620 and the missile window opens at 260 and closes at 760.
+ * Any bubble large enough to keep a hostile out of gun range (>= 620) also
+ * swallows most of the missile window, so a bigger radius does not buy safety,
+ * it buys silence - at 700 the only place in the system where a missile could
+ * be launched was a 60-unit sliver. Any bubble small enough to leave the
+ * weapons alone (< 500) leaves a hostile free to shoot from inside it.
+ *
+ * So the bubble does not try to be a gun shield. It is a *stand-off*, and the
+ * two things that actually protect a launching commander are separate and
+ * deliberate:
+ *
+ *   this file  - nothing hostile *starts* inside it, and anything already
+ *                inside backs off instead of engaging. That covers the spawn
+ *                table and the accidental fly-through.
+ *   main.js    - `LAUNCH_GRACE` makes the commander untouchable for six
+ *                seconds after undocking, which is what covers the ship that
+ *                spawned outside the bubble and is already in gun range.
+ *
+ * The radius is set to 400 for a different reason than safety: it is a
+ * *breathing space* around the ship, roughly two thirds of the gun's reach, so
+ * that the first thing a commander sees on undocking is empty sky rather than
+ * a nose. The floor it sets on hostile spawns (460) is what keeps a pirate
+ * from materialising in your face.
+ *
+ * Two mechanisms, because one is not enough:
+ *
+ *   radius   - spawn placement: nothing hostile *starts* inside the bubble.
+ *   holdOff  - a hostile already inside (it was there before the player, or the
+ *              player flew at it) breaks off instead of engaging, so the
+ *              bubble cannot be walked into accidentally.
+ */
+export const SAFE_ZONE = {
+  radius: 400,
+  holdOff: 0.35,
 };
 
 /** The player's ship is a Cobra in spirit. These are the world-space sizes. */
@@ -693,7 +758,7 @@ export function createTraffic(scene, system, seed, options) {
    * shell. It consumes no extra randomness on the ordinary path, so the spawn
    * stream for a system without a contract is bit-for-bit what it always was.
    */
-  function spawn(preferredKind, pocketShip) {
+  function spawn(preferredKind, pocketShip, playerPos) {
     const roll = rand();
     let kind = preferredKind;
     if (!kind && pocketShip) kind = roll < 0.7 ? 'pirate' : 'raider';
@@ -711,17 +776,34 @@ export function createTraffic(scene, system, seed, options) {
     // Place on a shell, biased toward the player's hemisphere so you actually
     // meet something without hunting for it. The pocket is the inner half of
     // that shell: they know somebody has been hired, and they are waiting.
+    //
+    // Hostiles are additionally pushed outside `SAFE_ZONE`: the inner edge of
+    // the shell (420) is well inside pirate gun range, so without this a
+    // hostile could open fire before the launch clamp had finished releasing.
+    // Traders, patrols and the pocket are exempt - only a ship that would
+    // *start* a fight is kept off the pad.
+    //
+    // The offset is measured from the player, not from the origin, because the
+    // player is not at the origin: they undock 360 units out. A hostile at the
+    // boundary would otherwise be outside the bubble around the station while
+    // the player was still deep inside it.
     const a = rand() * Math.PI * 2;
     const b = (rand() - 0.5) * 1.2;
     const shellOuter = pocketShip ? POCKET.spawnOuter : LAYOUT.spawnShellOuter;
-    const r = LAYOUT.spawnShellInner + rand() * (shellOuter - LAYOUT.spawnShellInner);
+    const isHostileKind = kind === 'pirate' || kind === 'raider';
+    let shellInner = LAYOUT.spawnShellInner;
+    if (isHostileKind && !pocketShip) shellInner = Math.max(shellInner, SAFE_ZONE.radius + 60);
+    const r = shellInner + rand() * Math.max(1, shellOuter - shellInner);
+    const px = playerPos ? playerPos.x : 0;
+    const py = playerPos ? playerPos.y : 0;
+    const pz = playerPos ? playerPos.z : 0;
     mesh.position.set(
-      Math.cos(a) * Math.cos(b) * r,
-      Math.sin(b) * r,
-      Math.sin(a) * Math.cos(b) * r,
+      px + Math.cos(a) * Math.cos(b) * r,
+      py + Math.sin(b) * r,
+      pz + Math.sin(a) * Math.cos(b) * r,
     );
 
-    const isHostile = kind === 'pirate' || kind === 'raider';
+    const isHostile = isHostileKind;
     const bounty = C.bountyFor(kind, danger);
 
     const entity = {
@@ -762,7 +844,6 @@ export function createTraffic(scene, system, seed, options) {
     mesh.lookAt(0, 0, 0);
     mesh.rotateY(Math.PI * 0.5 + (rand() - 0.5) * 1.4);
     mesh.rotateX((rand() - 0.5) * 0.4);
-
     shipSpeed(entity, entity.speed);
     scene.add(mesh);
     ships.push(entity);
@@ -782,8 +863,16 @@ export function createTraffic(scene, system, seed, options) {
     return s.kind !== 'canister' && s.kind !== 'capsule';
   }
 
-  /** Restock toward capacity. Called on a timer, not every frame. */
-  function topUp() {
+  /**
+   * Restock toward capacity. Called on a timer, not every frame.
+   *
+   * `playerPos` is optional and only affects *where* hostiles appear: the safe
+   * zone is measured from the player, so a restock that does not know where the
+   * player is cannot honour it. Omitting it is treated as the origin, which is
+   * the station - a stricter bubble than the truth, never a looser one, so a
+   * caller that forgets cannot accidentally spawn a hostile on the pad.
+   */
+  function topUp(playerPos) {
     const cap = Math.max(1, Math.round(
       (LAYOUT.trafficTarget + Math.round(danger * 4)) * trafficScale)) + pocket;
     // Counted over the pocket's *own* ships, not over hostiles in general.
@@ -804,7 +893,7 @@ export function createTraffic(scene, system, seed, options) {
       // would quietly starve the contract, and the commander would have to
       // leave and come back to find anyone to shoot.
       const wantHostile = own < pocket;
-      spawn(null, wantHostile);
+      spawn(null, wantHostile, playerPos);
       if (wantHostile) own += 1;
       live += 1;
       guard += 1;
@@ -820,9 +909,9 @@ export function createTraffic(scene, system, seed, options) {
    * promise is not kept until several minutes in. Passing 0 lowers the pocket,
    * so a cleared system goes back to being an ordinary one.
    */
-  function setPocket(n) {
+  function setPocket(n, playerPos) {
     pocket = Math.max(0, Math.min(POCKET.maxExtra, Math.round(n || 0)));
-    topUp();
+    topUp(playerPos);
     return pocket;
   }
 
@@ -996,6 +1085,16 @@ export function stepTraffic(traffic, playerState, playerPos, dt, hooks) {
   // The fallback keeps hand-built traffic objects in tests working.
   const rand = traffic.rand || Math.random;
   const hostilePatrols = !!(playerState && playerState.hostilePatrols);
+  // "Do not attack the commander for a moment after they arrive or launch."
+  //
+  // Read here rather than left to `hurtPlayer`, which is where it used to live.
+  // Grace that only swallows the damage is worse than no grace at all: measured
+  // on the shipped build, the first enemy missile left the rail at 4.3 seconds
+  // with grace still at 3.5 - so the commander watched a missile home in on a
+  // ship that took no damage from it. Seeing an attack that does nothing is not
+  // a protected arrival, it is a broken-looking one. The trigger is the place
+  // to hold, so the decision to shoot is what waits.
+  const playerGrace = !!(playerState && playerState.grace > 0);
 
   // Is a fight already happening nearby? One pass to find it, so the answer is
   // the same for every ship in the frame rather than depending on iteration
@@ -1034,6 +1133,27 @@ export function stepTraffic(traffic, playerState, playerPos, dt, hooks) {
     };
     const distance = Math.hypot(toPlayer.x, toPlayer.y, toPlayer.z) || 1;
 
+    // --- The launch bubble ------------------------------------------------
+    // How far this ship is from the **player**, not from the station.
+    //
+    // Anchor matters, and it took a live measurement to see why. The first
+    // version measured from the origin, where the station is; the player
+    // undocks at 360 units, so a hostile parked on the 700-unit boundary was
+    // already "outside the safe zone" while the player was still 340 units
+    // inside it. Measured on that version, seven seconds after undocking: four
+    // hostiles, two of them in `engage`, and a missile in flight. The bubble
+    // was protecting the station from the player's point of view and nobody
+    // else. Measuring from the player also covers arrival anywhere, not just
+    // the launch port.
+    //
+    // A hostile inside the bubble does not engage, and steers outward. This is
+    // the half of the safe zone that spawn placement cannot do: it covers the
+    // ship that was already there, or the commander who flew *into* a pirate
+    // rather than the other way round.
+    const fromPlayer = distance;
+    const insideSafeZone = fromPlayer < SAFE_ZONE.radius;
+    const heldOff = insideSafeZone && (s.hostile || s.aggression > 0.5);
+
     // --- Morale ----------------------------------------------------------
     // A badly damaged ship stops attacking and runs. Once set it stays set:
     // there is no repairing in space, so a ship that has broken off has
@@ -1057,13 +1177,31 @@ export function stepTraffic(traffic, playerState, playerPos, dt, hooks) {
     const wantsFight = s.aggression > 0.5 || (s.hostile && danger > 0.35) || joined;
     const inRange = distance < 900;
     if (!s.state) s.state = 'patrol';
+    // `heldOff` outranks the engage decision but not morale: a ship that is
+    // already fleeing keeps fleeing. Everything else holds station-keeping
+    // distance instead of closing, which is what stops the launch port from
+    // being a firefight.
     if (s.fleeing) s.state = 'flee';
+    else if (heldOff) s.state = 'patrol';
     else if (wantsFight && inRange) s.state = 'engage';
     else s.state = 'patrol';
 
     let aimPoint;
 
-    if (s.state === 'engage') {
+    if (heldOff && s.state !== 'flee') {
+      // Back off from the player until clear of the bubble, on the bearing it
+      // already has. Pushing along the ship's own outward radius - rather than
+      // away from the station - is what keeps the bubble centred on the
+      // commander: a pirate that only ran from the station would happily sit
+      // 700 units from the player and still be inside it.
+      const inward = fromPlayer || 1;
+      const push = SAFE_ZONE.radius + 120;
+      aimPoint = {
+        x: s.mesh.position.x + ((s.mesh.position.x - playerPos.x) / inward) * push,
+        y: s.mesh.position.y + ((s.mesh.position.y - playerPos.y) / inward) * push,
+        z: s.mesh.position.z + ((s.mesh.position.z - playerPos.z) / inward) * push,
+      };
+    } else if (s.state === 'engage') {
       aimPoint = interceptPoint(s, playerPos, playerState);
       // Do not ram: hold a stand-off distance and slide sideways.
       const standoff = 160;
@@ -1096,6 +1234,16 @@ export function stepTraffic(traffic, playerState, playerPos, dt, hooks) {
     steerToward(s, aimPoint, dt);
     integrateEntity(s, dt);
 
+    // --- Missiles and guns -------------------------------------------------
+    //
+    // Deliberately *no* firing gate here. The first version of this gated the
+    // trigger on `insideSafeZone`, and it was wrong twice over: it disabled
+    // the weapons across the whole missile window (see `SAFE_ZONE`), and it
+    // armed permanently for a commander who stopped moving. "Do not shoot the
+    // player for a moment after launch" is a statement about *time*, so it
+    // lives in the session as `grace`, where the damage side already honours
+    // it - one gate, on the receiving end, instead of a second one here.
+
     // --- Missiles --------------------------------------------------------
     // A missile is the one attack the player has to *answer* rather than
     // absorb, so it is rationed: a cooldown, a small magazine, and a launch
@@ -1104,7 +1252,7 @@ export function stepTraffic(traffic, playerState, playerPos, dt, hooks) {
     // ships do not have the patience to set that up, so the requirement is
     // simply a decent lock.
     s.missileCooldown -= dt;
-    if (s.missiles > 0 && s.state === 'engage' && !s.fleeing
+    if (s.missiles > 0 && s.state === 'engage' && !s.fleeing && !playerGrace
       && s.missileCooldown <= 0 && distance > 260 && distance < 760
       && hooks.onEnemyMissile) {
       const nx = toPlayer.x / distance, ny = toPlayer.y / distance, nz = toPlayer.z / distance;
@@ -1129,7 +1277,8 @@ export function stepTraffic(traffic, playerState, playerPos, dt, hooks) {
     // --- Shooting --------------------------------------------------------
     s.canFire -= dt;
     const playerFacingUs = true; // the caller decides if we are in the cone
-    if (s.state === 'engage' && s.canFire <= 0 && distance < C.FIRE_RANGE && playerFacingUs) {
+    if (s.state === 'engage' && !playerGrace && s.canFire <= 0 && distance < C.FIRE_RANGE
+      && playerFacingUs) {
       const nx = toPlayer.x / distance, ny = toPlayer.y / distance, nz = toPlayer.z / distance;
       const fwd = noseOf(s);
       const cone = fwd.x * nx + fwd.y * ny + fwd.z * nz;
