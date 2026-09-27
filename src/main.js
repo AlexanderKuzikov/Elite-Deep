@@ -107,6 +107,19 @@ const ARRIVAL_GRACE = 3.0;
 const LAUNCH_GRACE = 6.0;
 
 /**
+ * How long a laser bolt stays on screen, and how far ahead of the ship it
+ * starts.
+ *
+ * Both numbers are about being *seen*. The bolt lives 0.16 s - ten frames at
+ * 60 fps, which leaves something readable after a dropped frame, where the
+ * original 0.09 s gave five frames of a line that in practice was not drawn at
+ * all (see the note where the tracer is built). `TRACER_LEAD` starts the
+ * segment ahead of the cockpit so the hull does not swallow it.
+ */
+const TRACER_LIFE = 0.16;
+const TRACER_LEAD = 12;
+
+/**
  * How long the mouse hint stays on screen once flight begins without a captured
  * pointer, in seconds.
  *
@@ -1336,16 +1349,39 @@ export function boot(host, options) {
     // has already landed, so this is pure feedback - but it is *essential*
     // feedback, because without it a hitscan weapon feels like nothing
     // happened.
+    //
+    // It is offset off the ship's axis, and that is the whole reason it is
+    // visible at all. The first version ran the segment straight down the nose
+    // from `session.flight.pos`, which is exactly the line the camera looks
+    // along - so both endpoints projected to the *same pixel* and the tracer
+    // was a zero-length line, drawn every frame, invisible every frame. The
+    // arithmetic hid it neatly: 220 units is a long segment, and every number
+    // describing it looked healthy.
+    //
+    // Offsetting to the wings fixes it and is also what the ship's own model
+    // implies - these are laser mounts, not a headlight. The near end is also
+    // pushed forward of the camera: at 15 units the camera is *behind* the
+    // hull, and a segment starting there would be drawn over the nose.
+    const lateral = 6.5;
+    const right = FLIGHT.rightOf(session.flight);
+    const muzzle = {
+      x: origin.x + right.x * lateral + dir.x * TRACER_LEAD,
+      y: origin.y + right.y * lateral + dir.y * TRACER_LEAD,
+      z: origin.z + right.z * lateral + dir.z * TRACER_LEAD,
+    };
     session.tracers.push({
-      from: { x: origin.x, y: origin.y, z: origin.z },
+      from: muzzle,
       to: {
-        x: origin.x + dir.x * shot.tracerLength,
-        y: origin.y + dir.y * shot.tracerLength,
-        z: origin.z + dir.z * shot.tracerLength,
+        x: muzzle.x + dir.x * shot.tracerLength,
+        y: muzzle.y + dir.y * shot.tracerLength,
+        z: muzzle.z + dir.z * shot.tracerLength,
       },
       colour: shot.colour,
-      life: 0.09,
-      maxLife: 0.09,
+      // Long enough to read, short enough to still look like a bolt rather than
+      // a beam. At 0.09 s a 60 fps player got five frames of a line that was
+      // not there; 0.16 is about ten frames and survives a dropped frame.
+      life: TRACER_LIFE,
+      maxLife: TRACER_LIFE,
     });
 
     // Missiles are shootable, and they are the *nearer* target more often
@@ -1745,14 +1781,29 @@ export function boot(host, options) {
 
   function spawnImpact(point, colour) {
     const mesh = new THREE.Mesh(
-      new THREE.IcosahedronGeometry(0.4, 0),
+      // Bigger than the 0.4 it was, and scaled per frame below rather than
+      // left at world size. At 0.4 the flash measured 0.53 px at 900 units and
+      // 2.4 px at 200 - sub-pixel across the whole of combat range, on screen
+      // for 0.18 s. The hit resolved, the damage landed, and nothing was drawn:
+      // the player had no way to tell a hit from a miss.
+      new THREE.IcosahedronGeometry(1, 1),
       new THREE.MeshBasicMaterial({
         color: colour || 0xffd27a, transparent: true, opacity: 1, blending: THREE.AdditiveBlending,
       }),
     );
     mesh.position.set(point.x, point.y, point.z);
+    // Held at a roughly constant screen size, the way the impact of a round
+    // reads in a film: a distant hit and a near hit should both be visible, and
+    // a world-sized sphere cannot do that. `renderer` exposes the camera
+    // distance through the flight state, so the scale is derived from the real
+    // range rather than assumed.
+    const cam = session.flight.pos;
+    const range = Math.max(20, Math.hypot(
+      point.x - cam.x, point.y - cam.y, point.z - cam.z,
+    ));
+    mesh.userData.impactScale = range * 0.055;
     renderer.scene.add(mesh);
-    effects.impacts.push({ mesh: mesh, life: 0.18, maxLife: 0.18 });
+    effects.impacts.push({ mesh: mesh, life: 0.28, maxLife: 0.28 });
   }
 
   /** Advance every cosmetic effect. Purely visual, so it is safe to skip. */
@@ -1773,7 +1824,10 @@ export function boot(host, options) {
     for (let i = effects.impacts.length - 1; i >= 0; i -= 1) {
       const e = effects.impacts[i];
       e.life -= dt;
-      e.mesh.scale.setScalar(1 + (1 - e.life / e.maxLife) * 3);
+      // Grow from the range-derived size, so the flash is roughly the same
+      // size on screen whether the target was 200 or 900 units away.
+      const t = 1 - Math.max(0, e.life) / e.maxLife;
+      e.mesh.scale.setScalar((e.mesh.userData.impactScale || 1) * (0.5 + t * 1.6));
       e.mesh.material.opacity = Math.max(0, e.life / e.maxLife);
       if (e.life <= 0) {
         renderer.scene.remove(e.mesh);
@@ -2917,6 +2971,8 @@ export function boot(host, options) {
    * deterministic. Two entries, looked up forever.
    */
   const tracerColours = new Map();
+  /** RGB components per colour, for gradients that need an alpha stop. */
+  const tracerColoursA = new Map();
   function tracerColour(hex) {
     let css = tracerColours.get(hex);
     if (css === undefined) {
@@ -2924,6 +2980,26 @@ export function boot(host, options) {
       tracerColours.set(hex, css);
     }
     return css;
+  }
+
+  /**
+   * The same colour as an `rgba()` string at the given alpha.
+   *
+   * `tracerColour` returns an opaque hex, which is fine for `strokeStyle` and
+   * useless for a radial gradient - a gradient stop needs the alpha in the
+   * colour, because `globalAlpha` applies to the whole fill rather than per
+   * stop. Keeping the two in one place means the flash cannot drift to a
+   * different hue than the bolt it belongs to.
+   */
+  function tracerColourA(hex, alpha) {
+    let rgba = tracerColoursA.get(hex);
+    if (rgba === undefined) {
+      const c = new THREE.Color(hex);
+      rgba = [Math.round(c.r * 255), Math.round(c.g * 255), Math.round(c.b * 255)];
+      tracerColoursA.set(hex, rgba);
+    }
+    return 'rgba(' + rgba[0] + ',' + rgba[1] + ',' + rgba[2] + ','
+      + Math.max(0, Math.min(1, alpha)).toFixed(3) + ')';
   }
 
   function drawTracers(ctx) {
@@ -2934,18 +3010,64 @@ export function boot(host, options) {
     const right = FLIGHT.rightOf(f);
     const basis = { forward: fwd, up: up, right: right };
     const camPos = { x: f.pos.x, y: f.pos.y, z: f.pos.z };
+    // Scaled with the display, because a hairline on a 4K panel is a hairline
+    // nobody finds. The old 1.6 was tuned on a small window.
+    const k = HUD.hudScale(hudH);
     ctx.save();
+    ctx.lineCap = 'round';
     for (const t of session.tracers) {
       const a = HUD.projectToScreen(t.from, camPos, basis, hudW, hudH, RENDER.CAMERA.fov);
       const b = HUD.projectToScreen(t.to, camPos, basis, hudW, hudH, RENDER.CAMERA.fov);
       if (!a || !b) continue;
-      ctx.globalAlpha = Math.max(0, t.life / t.maxLife);
+      const fade = Math.max(0, t.life / t.maxLife);
+      // The bolt fades and thins together, so the tail end reads as dying
+      // rather than as the line being switched off.
+      ctx.globalAlpha = fade;
+      // A soft wide pass under a hard core: the glow is what makes a bright
+      // line read as *hot* against a black sky, and the core is what keeps it
+      // crisp. Drawn widest-first so the core lands on top.
       ctx.strokeStyle = tracerColour(t.colour);
-      ctx.lineWidth = 1.6;
+      ctx.lineWidth = 5.2 * k * fade;
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
+      // The core dims with the bolt too. Its alpha used to saturate at 1 until
+      // `fade` fell to 0.8, so for the first two fifths of every bolt the core
+      // was drawn at full strength while the glow around it shrank - which
+      // reads as a hairline being switched off, the exact failure mode the
+      // project already has a rule about: let the expression fade, not the
+      // legibility.
+      ctx.globalAlpha = Math.min(1, fade * 1.25) * fade;
+      ctx.lineWidth = 2.2 * k;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      // Muzzle flash: a hot dot at the near end, brightest on the frame the
+      // shot is fired. Without it the bolt appears from nowhere and the eye has
+      // nothing to tell it where it came from.
+      //
+      // It fades across the *whole* life of the bolt rather than a threshold at
+      // 0.55 of it. With the threshold, the flash ran at full size for two
+      // frames and then vanished while the bolt itself lived three more:
+      // measured per frame on the HUD canvas, the ink went 3445 -> 357 in one
+      // step, because a 19 px disc disappeared between two frames. A player
+      // reads that as a flicker, not as a bolt, and the measurement is what
+      // caught it - the arithmetic looked reasonable on paper.
+      const flash = fade * fade;
+      if (flash > 0.02) {
+        const r = (4 + 15 * flash) * k;
+        const g = ctx.createRadialGradient(a.x, a.y, 0, a.x, a.y, r);
+        g.addColorStop(0, 'rgba(255,255,255,' + (0.85 * flash).toFixed(3) + ')');
+        g.addColorStop(0.35, tracerColourA(t.colour, 0.65 * flash));
+        g.addColorStop(1, tracerColourA(t.colour, 0));
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(a.x, a.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     ctx.globalAlpha = 1;
     ctx.restore();
