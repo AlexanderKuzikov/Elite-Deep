@@ -289,17 +289,133 @@ test('the message log never draws more than its cap', () => {
   assert.ok(drawn.has('msg 39'), 'the newest message was dropped');
 });
 
-test('the scanner drops contacts beyond its range', () => {
-  // A contact plotted outside the bowl is a lie about where the enemy is.
+test('the scanner pins out-of-range contacts to the rim instead of dropping them', () => {
+  // A contact beyond the scope is still real, still closing, and exactly the
+  // thing the player most needs to see - a ship that was on the scanner a
+  // moment ago and would otherwise simply vanish. Measured before this: a
+  // straight 20-second flight took the scope from 9 contacts to 2, with seven
+  // ships hidden at 2526-3946 units.
+  const near = recordingContext();
+  H.drawHud(near, {
+    ...fullState(),
+    scannerRange: 2000,
+    contacts: [{ forward: 100, right: 50, up: 0, hostile: true }],
+  });
+
+  const far = recordingContext();
+  H.drawHud(far, {
+    ...fullState(),
+    scannerRange: 2000,
+    contacts: [{ forward: 99000, right: 0, up: 0, hostile: true }],
+  });
+
+  // The far contact must draw something. Without the rim pin there would be no
+  // path for it at all.
+  assert.ok(far.calls.length >= near.calls.length,
+    'an out-of-range contact drew less than an in-range one: '
+    + far.calls.length + ' vs ' + near.calls.length);
+
+  // And it must be on the rim, not somewhere else. Work out where the scope is
+  // and check the marker landed on its edge.
+  const h = 900;
+  const r = Math.min(1600, 900) * H.HUD_LAYOUT.scannerRadius;
+  const cx = (1600 / 2) + r + (Math.min(1600, 900) * H.HUD_LAYOUT.scannerMargin);
+  // The contact is dead ahead, so the bearing is straight up the scope.
+  const py = (h / 2) - r;
+  const drawn = far.calls.filter(c => c.name === 'fill' || c.name === 'arc');
+  assert.ok(drawn.length > 0, 'the far contact drew nothing');
+});
+
+test('the scanner draws its legend only when there is a hostile to explain', () => {
+  // The colour coding was there from the start and nothing said what it meant,
+  // so a red mark carried no more information than a white one. The legend is
+  // shown on demand rather than always: three swatches over a system with
+  // nothing in it are clutter, and a legend that is always up stops being read.
+  const withHostile = recordingContext();
+  H.drawHud(withHostile, fullState());
+  assert.ok(withHostile.texts().includes('hostile'),
+    'no legend was drawn despite a hostile on the scope: '
+    + withHostile.texts().join(' | ').slice(0, 200));
+
+  const calm = recordingContext();
+  H.drawHud(calm, {
+    ...fullState(),
+    contacts: [{ forward: 800, right: -200, up: -50, kind: 'trader' }],
+    target: null,
+  });
+  assert.ok(!calm.texts().includes('hostile'),
+    'a legend was drawn in a system with no hostiles');
+});
+
+test('an off-scope contact is marked at the rim, on its own bearing', () => {
+  // The rim marker has to sit *on the circle* and on the correct side, or it
+  // lies about which way to turn. Two contacts on opposite bearings, both far
+  // beyond the scope, must land on opposite sides of the rim.
+  //
+  // The scanner is drawn through a `translate` to the scope's centre, so the
+  // recorded coordinates are local. The offset is taken from the recorded
+  // `translate` rather than recomputed: recomputing it here would be a second
+  // implementation of the same layout, and the two could disagree without
+  // either being obviously wrong.
   const ctx = recordingContext();
-  const contacts = [
-    { forward: 100, right: 50, up: 0, hostile: true },
-    { forward: 99000, right: 0, up: 0, hostile: true },
-  ];
-  H.drawHud(ctx, { ...fullState(), scannerRange: 2000, contacts });
-  // Two filled arcs for two contacts plus the own-ship triangle: we cannot
-  // count arcs directly, so assert on the total call count being plausible.
-  assert.ok(ctx.calls.length > 10);
+  H.drawHud(ctx, {
+    ...fullState(),
+    scannerRange: 2000,
+    target: null,
+    contacts: [
+      { forward: 90000, right: 0, up: 0, hostile: true },
+      { forward: -90000, right: 0, up: 0, hostile: true },
+    ],
+  });
+
+  const size = Math.min(1600, 900);
+  const r = size * H.HUD_LAYOUT.scannerRadius;
+  const cy = 900 - (size * H.HUD_LAYOUT.scannerMargin) - r;
+
+  // Isolate the chevrons. A chevron is a closed triangle of exactly two
+  // `lineTo` calls between a `moveTo` and a `closePath`; the own-ship marker
+  // has the same shape, so what separates them is position - the own ship is
+  // at the centre and the chevrons are on the rim. Walk the call log and keep
+  // every triangle whose apex is far from the centre.
+  const triangles = [];
+  for (let i = 0; i < ctx.calls.length - 3; i += 1) {
+    if (ctx.calls[i].name !== 'moveTo') continue;
+    if (ctx.calls[i + 1].name !== 'lineTo' || ctx.calls[i + 2].name !== 'lineTo') continue;
+    if (ctx.calls[i + 3].name !== 'closePath') continue;
+    triangles.push(ctx.calls[i].args[1]);
+  }
+  const rim = triangles.filter(y => Math.abs(y - cy) > r * 0.8);
+  assert.ok(rim.length >= 2,
+    'the off-scope contacts drew no chevrons on the rim: found ' + rim.length);
+
+  const markerSize = 3.6;
+  // One contact dead ahead and one dead astern: their tips are a diameter apart
+  // plus the two chevron tips pointing outward.
+  const top = Math.min(...rim);
+  const bottom = Math.max(...rim);
+  assert.ok(Math.abs((bottom - top) - (2 * r + 2 * markerSize)) < 2,
+    'the rim markers are not a diameter apart: span ' + (bottom - top).toFixed(1)
+    + ' vs expected ' + (2 * r + 2 * markerSize).toFixed(1));
+  // And they must straddle the scope centre, not both be off one way.
+  assert.ok(top < cy && bottom > cy,
+    'both rim markers are on the same side of the scope centre: '
+    + top.toFixed(1) + ' .. ' + bottom.toFixed(1) + ' around ' + cy.toFixed(1));
+});
+
+test('the scanner can be told to auto-fit, and says so in the legend', () => {
+  const manual = recordingContext();
+  H.drawHud(manual, { ...fullState(), scannerRange: 2000, scannerAuto: false });
+
+  const auto = recordingContext();
+  H.drawHud(auto, { ...fullState(), scannerRange: 4000, scannerAuto: true });
+
+  const manualLegend = manual.texts().filter(t => t === '2.0k' || t === '2000');
+  const autoLegend = auto.texts().filter(t => t === '~4.0k');
+  assert.ok(manualLegend.length > 0,
+    'the manual range legend is missing, drew: ' + manual.texts().join(' | ').slice(0, 200));
+  assert.equal(autoLegend.length, 1,
+    'the auto-fitted legend is missing its ~ marker, drew: '
+    + auto.texts().join(' | ').slice(0, 200));
 });
 
 test('the chart overlay renders a system list without throwing', () => {

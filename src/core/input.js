@@ -10,20 +10,43 @@
  * Two control schemes are supported and both are always live:
  *
  *   keyboard  - arrows or WASD for pitch/roll, Q/E for yaw, A/Z throttle
- *   mouse     - pointer-lock, virtual-stick style: the further you push from
- *               the centre of the screen, the harder the ship turns
+ *   mouse     - pointer-lock, direct: the ship keeps turning for as long as you
+ *               keep moving the mouse, and holds the last rate when you stop
  *
- * The mouse is a "virtual stick" rather than a direct-drag scheme because
- * Elite is a game about holding a turn, and a relative-drag mouse makes holding
- * a turn impossible without endless re-dragging.
+ * ## Why direct, and not a spring-centred stick
  *
- * The stick rides on the *movement* of the cursor, not on its resting place:
- * `movementX`/`movementY` are integrated and the accumulated deflection decays
- * back to centre whenever the mouse is still. That is the model a joystick has -
- * push to turn, let go and it springs back - and it is the only model that works
- * under pointer lock. A resting-position stick is implied by the browser's
- * cursor being locked at the centre, which makes `clientX`/`clientY` useless as
- * a deflection signal.
+ * This used to be a virtual stick: mouse movement was *integrated* into a
+ * deflection which then decayed back to centre at 2.2 units/s. The reasoning
+ * was that Elite is a game about holding a turn, and a relative mouse would
+ * make holding one impossible without endless re-dragging.
+ *
+ * The premise was wrong, and the model that replaced it measures out like this
+ * (all figures from the same instrument that the tests use):
+ *
+ *   - The old model had an **equilibrium hand speed** of 230 px/s: drag slower
+ *     and the spring cancelled every pixel you contributed, drag faster and the
+ *     stick grew. Below about 130 px/s the stick never left the deadzone at all
+ *     - a slow correction produced *exactly nothing*, not a gentle turn.
+ *   - A turn died in 0.42 s once the hand stopped, so holding a course meant
+ *     continuously dragging the mouse.
+ *   - Reaching full deflection took 0.3-1.4 s of sustained fast dragging.
+ *
+ * The correct reading of "hold a turn" is that the *applied rate* should stay
+ * put when the hand stops - which is what happens here, and what every modern
+ * space sim does. Nothing has to be re-dragged: the ship holds the rate it was
+ * given until it is given another.
+ *
+ * The two models are the same integration, differing only in whether the state
+ * decays. There is no spring, no equilibrium hand speed and no threshold below
+ * which input is discarded. What replaces them is one constant: `MOUSE.rate`,
+ * the turn rate one pixel of travel buys. Measured on the same instrument the
+ * tests use, with the old numbers beside it for scale:
+ *
+ *   - 10 px of travel produces a 0.035 rate that is still 0.035 a second and a
+ *     half later (was: 0.035 that had decayed to 0 by frame one of stillness).
+ *   - A full-rate turn is a 285 px sweep - about a third of the screen width.
+ *   - A 9 px correction steers (was: exactly nothing, forever).
+ *   - The frame rate does not enter the arithmetic at all.
  */
 
 /**
@@ -81,41 +104,55 @@ export const BINDINGS = {
 };
 
 /**
- * The virtual stick: throw, spring and the pointer-lock timing.
+ * Mouse flight: sensitivity and the pointer-lock timing.
+ *
+ * There is no spring here any more. The applied rate is *held* rather than
+ * released, which is what makes a slow correction a slow correction instead of
+ * nothing at all. See the header for the measurements that killed the old
+ * model.
  */
 export const MOUSE = {
-  // Fraction of the stick throw that counts as centred rather than as a turn.
-  deadzone: 0.06,
   /**
-   * How quickly the stick springs back to centre, in *deflections per second*.
+   * Rate per pixel, as a fraction of full deflection.
    *
-   * This is the "hold a turn" control: a mouse held steady bleeds its
-   * deflection off at 2.2 units/s, so a full-deflection turn relaxes to centre
-   * in about 0.45 s and a gentle 0.15 nudge is gone in 0.07 s - which is what
-   * makes a small correction a small correction rather than a permanent drift.
+   * One pixel of travel buys this much turn *rate*, and the rate stays until
+   * another pixel changes it. Calibrated so a comfortable flick crosses the
+   * screen's worth of travel for a useful turn: at 0.0035, a 285 px sweep is
+   * full rate, and the small corrections that matter in a dogfight are 10-30 px
+   * - comfortably above any noise floor.
+   *
+   * There is deliberately **no deadzone and no decay**: a deadzone on a
+   * *rate* control discards small input entirely (the old one threw away
+   * everything below 130 px/s of hand speed), and decay is what made the rate
+   * impossible to hold.
    */
-  decay: 2.2,
+  rate: 0.0035,
   /**
-   * Deflection per pixel, *before* decay is applied per frame.
+   * Viewport height the sensitivity above was calibrated against.
    *
-   * Chosen so that a steady drag arrives at full deflection just before the
-   * decay cancels it: at 60 fps, 230 px/s only just saturates. Drag faster than
-   * that and the stick pins to the stop; drag slower and it settles at a
-   * fraction of the throw, which is the fine control.
-   *
-   * This constant is coupled to `decay`. Changing one without the other moves
-   * the whole feel, so `input.test.js` measures the crossing rate where the two
-   * balance rather than trusting the numbers.
-   */
-  gain: 2.2 / 230,
-  /**
-   * Viewport height the sensitivity above was measured against. DPI and window
-   * size scale the pixel travel, so they must scale the gain with it.
+   * A pixel of mouse travel is a physical distance; a pixel of viewport is not.
+   * Without this, the same hand movement turns the ship half as fast on a 4K
+   * panel as on a laptop, which reads as "the mouse is broken on my screen".
    */
   referenceHeight: 900,
-  // Multiplier applied to the mouse axes versus the keyboard's hard 1.0.
-  // Slightly reduced so mouse flight is controllable at the edges.
-  authority: 0.92,
+  /**
+   * Multiplier applied to the mouse axes versus the keyboard's hard 1.0.
+   *
+   * Near parity now, and that is a change of intent rather than of taste. The
+   * old 0.92 existed because the spring made the mouse *unable* to hold a rate
+   * and the keyboard could, so the mouse was deliberately the weaker device and
+   * the manual said so. With a rate that holds, the mouse is no longer a
+   * second-class control and there is no reason to hobble it.
+   */
+  authority: 1.0,
+  /**
+   * Multiplier for the vertical axis alone.
+   *
+   * Pitching is the axis players notice first and the one that most often feels
+   * "too twitchy" at a sensitivity that suits roll, because the view moves
+   * across the screen rather than spinning with it.
+   */
+  pitchScale: 0.85,
   /**
    * How long after a manual release before the lock may be taken again, in
    * seconds.
@@ -144,8 +181,8 @@ export const MOUSE = {
 /**
  * A frame-by-frame input state.
  *
- * `keys` is a Set of codes currently held. `mouse` is the integrated virtual
- * stick, -1..1 per axis, and `pending` collects one-shot actions between frames
+ * `keys` is a Set of codes currently held. `mouse` is the applied turn rate,
+ * -1..1 per axis, and `pending` collects one-shot actions between frames
  * (a laser shot should fire once on press, not sixty times a second).
  *
  * `el` is where key events are listened for and `pointerTarget` is what the
@@ -159,11 +196,19 @@ export function createInput(target, options) {
 
   const state = {
     keys: new Set(),
-    // Integrated virtual stick, -1..1 per axis. Not a cursor offset: see the
-    // header. `mouseTarget` is what the stick is being pushed toward, and
-    // `mouse` is the relaxed value actually handed to `axes`.
+    /**
+     * The applied turn rate, -1..1 per axis, in the ship's own frame.
+     *
+     * Not an integrated push that leaks away: whatever the player dialled in
+     * stays until they dial something else. `x` is roll, `y` is pitch.
+     *
+     * The old model needed two values - a target the stick was pushed toward
+     * and a relaxed value that leaked back toward centre - because the spring
+     * only made sense if the two were told apart. With nothing to relax, one
+     * value is the whole state, and a second would only ever drift away from
+     * the first.
+     */
     mouse: { x: 0, y: 0 },
-    mouseTarget: { x: 0, y: 0 },
     pointerLocked: false,
     // Element the pointer is (or should be) locked to.
     pointerTarget: opts.pointerTarget || el,
@@ -241,8 +286,6 @@ export function createInput(target, options) {
     state.keys.clear();
     state.mouse.x = 0;
     state.mouse.y = 0;
-    state.mouseTarget.x = 0;
-    state.mouseTarget.y = 0;
     state.blurred = true;
   }
 
@@ -255,33 +298,38 @@ export function createInput(target, options) {
     // Under pointer lock the cursor sits at the screen centre and only the
     // *delta* carries information, so a scheme that reads `clientX` measures
     // nothing at all. See the header.
+    //
+    // The delta is added to the *rate*, not to a deflection: two pixels of
+    // travel mean twice the turn, and the turn stays after the hand stops.
+    // `clamp` is the only thing between the player and a rate beyond full, so
+    // a fast sweep pins the axis rather than running past it - which is also
+    // what lets the player return to centre deliberately by overshooting.
     const gain = mouseGain(state);
     const dx = typeof e.movementX === 'number' ? e.movementX : 0;
     const dy = typeof e.movementY === 'number' ? e.movementY : 0;
-    state.mouseTarget.x = clamp(state.mouseTarget.x + dx * gain, -1, 1);
-    state.mouseTarget.y = clamp(state.mouseTarget.y + dy * gain, -1, 1);
+    state.mouse.x = clamp(state.mouse.x + dx * gain, -1, 1);
+    state.mouse.y = clamp(state.mouse.y + dy * gain * MOUSE.pitchScale, -1, 1);
   }
 
   function onPointerLockChange() {
     state.pointerLocked = !!state.pointerTarget && document.pointerLockElement === state.pointerTarget;
     if (state.pointerLocked) {
-      // A fresh lock always starts centred, whatever the stick was doing when
-      // the last one ended.
+      // A fresh lock always starts from rest, whatever the rate was when the
+      // last one ended.
       state.mouse.x = 0;
       state.mouse.y = 0;
-      state.mouseTarget.x = 0;
-      state.mouseTarget.y = 0;
       // A lock that came back is proof the browser will grant one. Whatever
       // refusals were counted before are stale, and keeping them would leave
       // the mouse dead for the session after a single unlucky request.
       state.lockFailures = 0;
     } else {
       // Losing the lock - Escape, alt-tab, or the browser deciding - must
-      // centre the stick. Otherwise the ship keeps the last deflection and
-      // flies into the station while the player is using the mouse to click
-      // something.
-      state.mouseTarget.x = 0;
-      state.mouseTarget.y = 0;
+      // cancel the turn. Otherwise the ship keeps the last rate and flies into
+      // the station while the player is using the mouse to click something.
+      // With no spring to return the rate to zero on its own, this is the only
+      // thing that stops the ship when the lock goes away.
+      state.mouse.x = 0;
+      state.mouse.y = 0;
       // Every loss arms the cooldown, not just the programmatic one. Escape is
       // a *browser* release, so it never passes through `releaseMouse` - and
       // without this the next click asks for the pointer immediately, which
@@ -399,13 +447,18 @@ export function axes(state, dt) {
   if (held(state, 'yawRight')) yaw += 1;
   if (held(state, 'yawLeft')) yaw -= 1;
 
-  // Fold in the mouse virtual stick, then clamp so the two devices can be used
-  // together without exceeding full deflection. `stickFrom` handles the
-  // deadzone; the spring is handled by `stepMouse`.
+  // Fold in the mouse rate, then clamp so the two devices can be used together
+  // without exceeding full deflection.
+  //
+  // Note what is *not* here: no integration, no spring, no deadzone. The mouse
+  // value is already a rate in -1..1, so it is added as-is. `dt` is still
+  // recorded above for the cooldown, but nothing in the mouse path depends on
+  // it any more - which is the point. A frame rate cannot change how far the
+  // ship has turned for a given hand movement, and it cannot make a slow
+  // correction disappear.
   if (state.mouseEnabled) {
-    const m = stepMouse(state, dt);
-    roll += stickFrom(m.x) * MOUSE.authority;
-    pitch += stickFrom(m.y) * MOUSE.authority;
+    roll += state.mouse.x * MOUSE.authority;
+    pitch += state.mouse.y * MOUSE.authority;
   }
 
   if (state.invertPitch) pitch = -pitch;
@@ -425,35 +478,17 @@ export function axes(state, dt) {
 }
 
 /**
- * Map a -1..1 stick deflection to thrust authority.
+ * How much rate one pixel of mouse travel buys, this frame.
  *
- * A plain deadzone, then full authority immediately past it. The previous
- * version ramped linearly from the deadzone edge to a *saturation* point, on
- * the reasoning that a guessable curve beats an optimal one - but that only
- * makes sense for a scheme where the stick has a physical travel to spend. With
- * a spring-centred stick the curve is already in the player's hand: a small
- * nudge is a small turn because it decays before it accumulates. A ramp on top
- * of that just eats the first third of the throw.
+ * Scaled by the viewport so a centimetre of desk travel is a centimetre of
+ * desk travel on any monitor: a pixel of mouse travel is a physical distance,
+ * a pixel of viewport is not. The calibration height lives in `MOUSE`.
  */
-function stickFrom(v) {
-  return Math.abs(v) <= MOUSE.deadzone ? 0 : clamp(v, -1, 1);
-}
-
-/** How many units of deflection one pixel of mouse travel buys, this frame. */
 function mouseGain(state) {
   const h = (typeof window !== 'undefined' && window.innerHeight)
     || (state.pointerTarget && state.pointerTarget.clientHeight)
     || MOUSE.referenceHeight;
-  return MOUSE.gain * (MOUSE.referenceHeight / Math.max(1, h));
-}
-
-/** Drop the stick back toward centre at the spring rate. */
-function releaseStick(state, dt) {
-  const rate = MOUSE.decay * dt;
-  if (state.mouseTarget.x > 0) state.mouseTarget.x = Math.max(0, state.mouseTarget.x - rate);
-  else if (state.mouseTarget.x < 0) state.mouseTarget.x = Math.min(0, state.mouseTarget.x + rate);
-  if (state.mouseTarget.y > 0) state.mouseTarget.y = Math.max(0, state.mouseTarget.y - rate);
-  else if (state.mouseTarget.y < 0) state.mouseTarget.y = Math.min(0, state.mouseTarget.y + rate);
+  return MOUSE.rate * (MOUSE.referenceHeight / Math.max(1, h));
 }
 
 /**
@@ -470,24 +505,17 @@ export function frameDelta(state, dt) {
 }
 
 /**
- * Integrate the virtual stick for this frame and return it.
+ * The mouse rate for this frame, unchanged.
  *
- * A joystick is not a control that stays where you leave it, and a mouse has no
- * *position* under pointer lock, so the two are reconciled by giving the mouse
- * a stick that behaves like a joystick: the cursor's motion deflects it, and
- * the deflection bleeds back to centre whenever the mouse is still. Holding a
- * turn means keeping the mouse moving, which is exactly the gesture a player
- * already makes with the keyboard held down.
- *
- * The decay runs in every case, including while no mouse has ever been seen.
- * That keeps the function pure with respect to `dt`: calling it is what advances
- * the stick, so nothing depends on whether a mousemove happened to arrive this
- * frame. A stick that had been left at 0.5 would otherwise stay there forever
- * if the mouse were unplugged.
+ * Kept as a named function rather than inlined into `axes` because the tests
+ * read the applied rate directly, and "what the ship was told to do this frame"
+ * should not require building a flight descriptor to inspect. Unlike the spring
+ * it replaces it does not take `dt`: with nothing to decay there is no
+ * integration left, and a rate that depended on the frame rate would be the
+ * same defect in a new place.
  */
-function stepMouse(state, dt) {
-  releaseStick(state, dt);
-  return state.mouseTarget;
+export function mouseRate(state) {
+  return state.mouse;
 }
 
 function clamp(v, lo, hi) {
@@ -599,8 +627,6 @@ export function releaseMouse(state, quiet) {
   state.relockIn = quiet ? 0 : MOUSE.relockDelay;
   state.mouse.x = 0;
   state.mouse.y = 0;
-  state.mouseTarget.x = 0;
-  state.mouseTarget.y = 0;
 }
 
 /**
@@ -631,4 +657,5 @@ export default {
   BINDINGS, MOUSE,
   createInput, destroyInput, held, consume, axes, endFrame, frameDelta,
   requestMouse, releaseMouse, addPointerLock, tickMouse, mouseActive, lockRefused,
+  mouseRate,
 };

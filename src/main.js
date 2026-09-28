@@ -133,6 +133,18 @@ const MOUSE_HINT_SECONDS = 8;
 /** How often the traffic layer tops up, in seconds. */
 const TRAFFIC_INTERVAL = 6;
 
+/**
+ * How close a hostile has to be before the player is told about it.
+ *
+ * Chosen from the measured traffic rather than picked: pirates appear in the
+ * 420-1100 spawn shell and close at a few hundred units per second, so 1400 is
+ * roughly five seconds of warning at an attack run's speed - long enough to
+ * turn and see them, short enough that the message still means "now" and not
+ * "somewhere in this system". The clear radius is this times 1.4, giving the
+ * hysteresis that stops the line repeating on the boundary.
+ */
+const HOSTILE_WARN_RANGE = 1400;
+
 /** Missile behaviour, mirroring the combat module's declared constants. */
 const MISSILE = { speed: COMBAT.MISSILE_SPEED, life: COMBAT.MISSILE_LIFE, turn: COMBAT.MISSILE_TURN };
 
@@ -260,6 +272,34 @@ export function boot(host, options) {
     hits: [],             // recent damage, with the bearing it came from
     shots: [],            // in-flight enemy shots, purely visual + damage on arrival
     lastTrafficTopUp: 0,
+    /**
+     * Nearest hostile within the warning radius, or null.
+     *
+     * The player's only prior notice that a fight was coming was the first shot
+     * landing, so this exists to say "there is somebody out there" *before* that.
+     * Computed per frame in `updateFlight` so the HUD and the warning share one
+     * measurement rather than each taking their own.
+     */
+    nearestHostile: null,
+    /**
+     * Set while the player is inside a hostile encounter and has been told.
+     *
+     * A plain flag rather than the ship that armed it: the warning is about the
+     * *situation* ("there are hostiles here"), and keying it to one ship made
+     * four hostiles in the same approach produce four lines. Cleared only when
+     * nothing hostile is left in range, so the next approach warns again.
+     */
+    hostileWarned: false,
+    /**
+     * How many times the player has been told about nearby hostiles.
+     *
+     * A counter rather than only the message line, because the message log is a
+     * ring of forty and a firefight fills it with cooldown warnings inside two
+     * seconds - so a test that polls the log for the warning misses it in the
+     * normal case, not the edge case. This is observable state; the line is the
+     * presentation.
+     */
+    hostileWarnings: 0,
     impactCooldown: 0,    // seconds until another collision may hurt us
     jumpTarget: null,     // system index we are jumping to
     jumpFrom: null,
@@ -2327,9 +2367,61 @@ export function boot(host, options) {
     if (INPUT.consume(input, 'tradeOne')) stationUi.activateOne();
   }
 
-  let scannerRanges = [2000, 4000, 8000, 16000];
+  let scannerRanges = [2000, 3000, 4000, 6000, 8000, 12000, 16000];
   let scannerIndex = 0;
+  // Set once the player cycles the range by hand; the auto-fit then stands down.
+  let scannerManual = false;
+  // Last fitted range, so the first V press can keep the scale instead of
+  // jumping to an arbitrary rung of the ladder.
+  let autoScannerRange = scannerRanges[0];
+  /**
+   * The scanner's range: the player's choice, or the traffic's spread.
+   *
+   * The old behaviour was a fixed ladder the player cycled with V, starting at
+   * 2000 - and since `prune` culls traffic at 2600, the initial view was a
+   * sphere *smaller than the world*. Measured on a straight 20-second flight out
+   * of the station, the scope went from 9 of 9 contacts drawn to 7 at ten
+   * seconds and **2 at twenty**, with seven ships hidden at 2526-3946 units.
+   * Nothing was wrong with the ships; the scope was too small to show them.
+   *
+   * So the range now fits itself: the outermost thing on the board plus a
+   * margin, rounded to something readable. Two properties matter and both are
+   * tested:
+   *
+   *   - it never goes below `scannerRanges[0]`, so the scale does not twitch
+   *     when one distant contact drifts in and out of the fleet;
+   *   - it only ever moves in the ladder's own steps, so the rim stays a round
+   *     number and the player can still reason about it.
+   *
+   * The manual ladder is still there and still on V. Choosing a range is an
+   * explicit act, and once the player has made one the auto-fit stands down for
+   * the rest of the session rather than arguing with them.
+   */
+  function scannerRangeFor(contacts) {
+    if (scannerManual) return scannerRanges[scannerIndex];
+    let spread = 0;
+    for (const c of contacts) {
+      if (c.distance > spread) spread = c.distance;
+    }
+    // 1.25x: a contact sitting exactly on the rim is unreadable, and one just
+    // inside it is barely better.
+    const wanted = spread * 1.25;
+    for (const step of scannerRanges) if (wanted <= step) return step;
+    return scannerRanges[scannerRanges.length - 1];
+  }
+
   function cycleScanner() {
+    // First press takes control back from the auto-fit, keeping whatever range
+    // was on screen so the change is a step rather than a jump.
+    if (!scannerManual) {
+      scannerManual = true;
+      const wanted = autoScannerRange;
+      let best = 0;
+      for (let i = 0; i < scannerRanges.length; i += 1) {
+        if (scannerRanges[i] <= wanted) best = i;
+      }
+      scannerIndex = best;
+    }
     scannerIndex = (scannerIndex + 1) % scannerRanges.length;
     play('beep');
   }
@@ -2488,11 +2580,16 @@ export function boot(host, options) {
     }
 
     const rank = PLAYER.rankOf(player.kills);
+    // Fit the scope to the traffic, then hand the same number to the legend so
+    // the two cannot disagree.
+    const fittedRange = scannerRangeFor(contacts);
+    autoScannerRange = fittedRange;
     return {
       width: hudW,
       height: hudH,
       time: session.time,
-      scannerRange: scannerRanges[scannerIndex],
+      scannerRange: fittedRange,
+      scannerAuto: !scannerManual,
       radarMode: session.mode === MODE.CHART ? 'chart' : 'radar',
       showChart: session.mode === MODE.CHART,
       speed: FLIGHT.speedOf(f),
@@ -2518,6 +2615,11 @@ export function boot(host, options) {
         bearing: h.bearing, age: h.age, life: HUD.HUD_LAYOUT.damageArcLifetime,
       })),
       docking: session.mode === MODE.FLIGHT ? session.dockingVerdict : null,
+      // Nearest hostile, so the scanner can show that there is one at all - the
+      // red marks look like every other mark until you know the palette.
+      nearestHostile: session.nearestHostile,
+      hostilesInRange: session.nearestHostile ? session.nearestHostile.count : 0,
+      hostileWarnings: session.hostileWarnings,
       chart: session.mode === MODE.CHART ? chartState() : null,
     };
   }
@@ -2639,9 +2741,61 @@ export function boot(host, options) {
     if (session.modeTime >= HYPERSPACE_DURATION) completeJump();
   }
 
+  /**
+   * Say something *before* the first shot lands.
+   *
+   * Every warning this game had was reactive: "Under fire from behind" arrives
+   * with the shot, "Missile inbound!" with the missile. Measured on a fresh
+   * start out of Lave, that left the whole approach to four pirates silent -
+   * the nearest at 534 units - so the first thing a commander learned about the
+   * fight was that they were already in it. This is the other half of the
+   * complaint "после старта непонятно что происходит, кто-то стреляет, почему".
+   *
+   * One line per *encounter*, not per ship. The first version named the nearest
+   * ship by distance and re-armed whenever that changed - measured, four
+   * hostiles in the same approach produced two lines two seconds apart, both
+   * true and neither useful, because what the player needs to know is "there
+   * are hostiles here", once. So the warning is armed while the player is
+   * inside the radius at all and clears only when there are no hostiles left in
+   * it, which is a fact about the situation rather than about one ship.
+   */
+  function warnAboutNearbyHostiles() {
+    const f = session.flight;
+    let nearest = null;
+    let nearestD = Infinity;
+    let inRange = 0;
+    for (const s of session.traffic.ships) {
+      if (s.dead || !s.hostile) continue;
+      const d = WORLD.dist(s.mesh.position, f.pos);
+      if (d < nearestD) { nearestD = d; nearest = s; }
+      if (d < HOSTILE_WARN_RANGE) inRange += 1;
+    }
+    session.nearestHostile = nearest
+      ? { distance: nearestD, count: inRange, target: nearest === session.target }
+      : null;
+
+    // Nothing in range: the encounter is over, and the next approach gets its
+    // own warning.
+    if (!inRange) { session.hostileWarned = false; return; }
+    // Already warned during this encounter.
+    if (session.hostileWarned) return;
+    session.hostileWarned = true;
+    // Recorded as well as said, because the message log is a ring of forty and
+    // a firefight fills it with cooldown warnings - measured, a warning pushed
+    // out of the log within two seconds is the normal case, not the edge. The
+    // counter is what a test can read; the line is what the player sees.
+    session.hostileWarnings += 1;
+    say(inRange === 1
+      ? 'Hostile on the scanner, ' + Math.round(nearestD) + ' units'
+      : inRange + ' hostiles on the scanner, nearest '
+        + Math.round(nearestD) + ' units',
+    HUD.HUD_COLOURS.danger);
+  }
+
   function updateFlight(dt) {
     if (session.grace > 0) session.grace = Math.max(0, session.grace - dt);
     handleFlightInput(dt);
+    warnAboutNearbyHostiles();
 
     // --- Traffic ----------------------------------------------------------
     session.lastTrafficTopUp += dt;

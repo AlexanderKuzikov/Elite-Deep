@@ -615,6 +615,131 @@ try {
   check('control returned after the jump', jump.mode === 'flight', jump.mode);
   check('the visit was recorded', jump.visited >= 2, jump.visited + ' systems');
 
+  // --- Proactive threat warning -------------------------------------------
+  // Every prior warning was reactive: "Under fire from behind" arrives with the
+  // shot. The point of this one is that it arrives *before*, so the check is
+  // that a hostile was announced while the player still had shields - not just
+  // that the line exists somewhere in the log.
+  //
+  // Isolated deliberately, twice over. First, the career: this runs the clock
+  // for eight seconds with pirates in the sky, which costs hull, shields,
+  // energy and missiles, and every later check that looks at those numbers then
+  // fails for a reason that has nothing to do with what it is testing.
+  // Measured: without the restore, "the ship has combat resources" reported
+  // `hull 44 shields 0` on the frame after. So the career is snapshotted and put
+  // back.
+  //
+  // Second, and this is the one that kept coming back: the *pirates*. Restoring
+  // the player's numbers leaves the ships that were shooting them alive,
+  // aggroed and parked a few hundred units off the nose, and the next block
+  // that steps the game hands them eight more seconds of free fire. Measured
+  // after the career restore was already in place: `hull 65.7 shields 0` on the
+  // very next resources check. So the encounter is cleared too - the hostiles
+  // that were in range are removed from the system. A gameplay check is allowed
+  // to cost the world it ran in; it is not allowed to leave that cost behind for
+  // the next check.
+  const threat = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    g.undock();
+    g.step(1 / 60, undefined, { render: false });
+
+    const before = {
+      hull: g.player.hull, shields: g.player.shields, energy: g.player.energy,
+      missiles: g.player.missiles, cash: g.player.cash,
+      warnings: g.hudState().hostileWarnings,
+    };
+
+    // One frame to let the undock settle: `setMode` is applied inside the step,
+    // and `updateFlight` - where the warning lives - only runs in FLIGHT.
+    //
+    // Read the counter rather than polling the message log. The log is a ring
+    // of forty and this run fires continuously - measured, "Laser overheated"
+    // alone fills every slot within two seconds, so the warning is pushed out
+    // before any poller could see it. The counter is the same fact without the
+    // presentation in the way.
+    let hostilesSeen = 0;
+    let nearest = Infinity;
+    let maxInRange = 0;
+    let modeSeen = '';
+    // The claim worth testing is not "a line was said" but "it was said before
+    // the fight started". So the first frame on which a hostile was in range is
+    // compared against the frame the ship first took damage.
+    let firstHostileFrame = -1;
+    let firstDamageFrame = -1;
+    for (let i = 0; i < 60 * 8; i += 1) {
+      g.step(1 / 60, undefined, { render: false });
+      modeSeen = g.mode;
+      const h = g.hudState();
+      maxInRange = Math.max(maxInRange, h.hostilesInRange);
+      if (h.nearestHostile) {
+        hostilesSeen += 1;
+        if (h.nearestHostile.distance < nearest) nearest = h.nearestHostile.distance;
+        if (firstHostileFrame < 0) firstHostileFrame = i;
+      }
+      if (firstDamageFrame < 0 && g.player.shields < before.shields) firstDamageFrame = i;
+    }
+    const after = {
+      hull: g.player.hull, shields: g.player.shields, energy: g.player.energy,
+      missiles: g.player.missiles, cash: g.player.cash,
+      warnings: g.hudState().hostileWarnings,
+    };
+
+    // Put the career back exactly as it was, minus the counter, which is the
+    // observation rather than the state.
+    g.player.hull = before.hull;
+    g.player.shields = before.shields;
+    g.player.energy = before.energy;
+    g.player.missiles = before.missiles;
+    g.player.cash = before.cash;
+
+    // And put the sky back too. Every ship still carrying a grudge is stamped
+    // out rather than merely calmed: a `hostile = false` pirate still has a
+    // position, a state and a waypoint at the player's nose, and the next block
+    // that runs the clock would find it again. Removal is the honest way to
+    // undo "there is a fight happening" - the ships are the fight.
+    const ships = g.session.traffic.ships;
+    let cleared = 0;
+    for (let i = ships.length - 1; i >= 0; i -= 1) {
+      const s = ships[i];
+      if (!s.hostile && !s.dead) continue;
+      if (s.mesh && s.mesh.parent) s.mesh.parent.remove(s.mesh);
+      ships.splice(i, 1);
+      cleared += 1;
+    }
+    if (g.session.target && !ships.includes(g.session.target)) g.session.target = null;
+    g.session.incoming.length = 0;
+    g.session.shots.length = 0;
+    // A fresh, unhurried fleet, so the rest of the suite has traffic to look at
+    // without inheriting a war.
+    g.session.traffic.topUp(g.session.flight.pos);
+    g.session.lastTrafficTopUp = 0;
+
+    return {
+      warnings: before.warnings, lastWarnings: after.warnings,
+      hostilesSeen, maxInRange, cleared,
+      nearest: Number.isFinite(nearest) ? Math.round(nearest) : null,
+      modeSeen, firstHostileFrame, firstDamageFrame,
+      cost: { hull: before.hull - after.hull, shields: before.shields - after.shields },
+    };
+  });
+  check('a nearby hostile is announced', threat.warnings > 0 || threat.lastWarnings > 0,
+    'warnings ' + threat.warnings + ' -> ' + threat.lastWarnings
+      + '; nearest ' + threat.nearest + '; hostiles in range ' + threat.maxInRange
+      + '; observed in ' + threat.modeSeen);
+  // The whole point of the change: notice before contact, not during it.
+  // `<=` and not `<`: on the frame the warning fires, the hostile is already in
+  // range, so the two are allowed to coincide. A warning that arrives in the
+  // same frame as the first hit is late but it is not *after*.
+  check('the warning arrives before the shooting does',
+    threat.firstHostileFrame >= 0
+      && (threat.firstDamageFrame < 0 || threat.firstHostileFrame <= threat.firstDamageFrame),
+    'first hostile on frame ' + threat.firstHostileFrame
+      + ', first damage on frame ' + threat.firstDamageFrame);
+  check('the announcement names the encounter, not each ship in it',
+    threat.maxInRange > 0 && threat.lastWarnings - threat.warnings <= 1,
+    (threat.lastWarnings - threat.warnings) + ' warning(s) over 8 s for '
+      + threat.maxInRange + ' hostile(s) in range');
+
   const shot2 = await page.screenshot({ path: join(shotDir, '03-arrival.png') }).catch(() => null);
   check('an arrival frame rendered', shot2 !== null);
 
@@ -683,6 +808,17 @@ try {
       || g.session.traffic.spawn('trader');
     trader.hostile = false;
     trader.aggression = 0;
+    // Sit *in* the wreck, because that is where a scoop happens and because a
+    // canister dropped two kilometres away is culled by the despawn sphere
+    // before the assertions below can look at it. Measured: the check read
+    // "1 canister(s) in a list of 7 (was 7)" - the canister was created, set
+    // adrift, and pruned inside the 90 frames of settle the check runs, so the
+    // list was the same length before and after and the check failed on the
+    // physics working exactly as designed. The subject of this check is the
+    // drop and the leak, not the drift; park the ship on the kill first.
+    const t = trader.mesh.position;
+    g.session.flight.pos = { x: t.x, y: t.y, z: t.z };
+    g.session.flight.vel = { x: 0, y: 0, z: 0 };
     const sceneBefore = g.renderer.scene.children.length;
     const inListBefore = g.session.traffic.ships.length;
     const killed = g.strike(trader, 9999);
@@ -696,7 +832,20 @@ try {
 
     // Let them be simulated for a moment, which is where a missing `turnRate`
     // turns the quaternion - and then the position - into NaN.
+    //
+    // Hostiles are held at arm's length for the duration. `g.step` runs the
+    // whole game, top-up and prune included, and this is a damage-path check
+    // standing next to a resources check - so the settle was spawning pirates
+    // and letting them shoot, and "the ship has combat resources" then reported
+    // `shields 0` for a reason that had nothing to do with ships. Measured
+    // twice: `hull 44 shields 0` and `hull 65.7 shields 0`. The wreckage
+    // assertions do not care whether anything is hostile, so the cheapest
+    // correct fix is to make sure nothing is.
+    const hostiles = g.session.traffic.ships.filter(s => s.hostile && !s.dead);
+    const held = hostiles.map(s => s.hostile);
+    for (const s of hostiles) { s.hostile = false; s.aggression = 0; s.state = 'patrol'; }
     for (let i = 0; i < 90; i++) g.step(1 / 60, 6000 + i / 60, { render: false });
+    hostiles.forEach((s, i) => { s.hostile = held[i]; });
     const finiteAfter = canisters.every(c => Number.isFinite(c.mesh.position.x)
       && Number.isFinite(c.mesh.position.y) && Number.isFinite(c.mesh.position.z));
 
@@ -707,6 +856,7 @@ try {
       inListAfter: g.session.traffic.ships.length,
       canisters: canisters.length,
       capsules: capsules.length,
+      heldQuiet: hostiles.length,
       meshesPresent: meshesPresent,
       finite: finite,
       finiteAfter: finiteAfter,
@@ -1118,19 +1268,23 @@ try {
       () => page.evaluate(() => window.__ELITE_GAME__.mode === 'flight'),
       15000);
   }
+  // Two `check` calls, one name per way it can fail - which is why the count of
+  // `check(` calls in this file is not the count of checks in the report, and
+  // why the header's "the number equals the number of call sites" stopped being
+  // true the day it was written. That is not a rounding error: the whole point
+  // of comparing the two was to catch a step that had silently dropped out, and
+  // a comparison that is off by two cannot do it. The names are distinct now,
+  // and exactly one of them runs.
   const preDeathMode = await page.evaluate(() => window.__ELITE_GAME__.mode);
-  let ready = preDeathMode === 'flight' || preDeathMode === 'dead';
   if (preDeathMode !== 'flight' && preDeathMode !== 'dead') {
-    check('respawn check starts from flight or death', false, preDeathMode);
-    ready = false;
-  }
-  if (preDeathMode === 'dead' && !await launchIfDead()) {
-    check('respawn check starts from flight or death', false, 'stuck dead');
-    ready = false;
+    check('the respawn check can start from flight or death', false,
+      'stuck in ' + preDeathMode);
+  } else if (preDeathMode === 'dead' && !await launchIfDead()) {
+    check('the respawn check can start from flight or death', false, 'stuck dead');
   }
   let respawnBefore = -1;
   let reachedDead = false;
-  if (ready) {
+  if (preDeathMode === 'flight' || preDeathMode === 'dead') {
     respawnBefore = await page.evaluate(
       () => window.__ELITE_GAME__.renderer.scene.children.length);
     // Ram the station until dead: shields down, a sliver of hull, parked

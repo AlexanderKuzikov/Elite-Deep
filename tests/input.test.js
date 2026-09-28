@@ -324,31 +324,35 @@ function withDocumentOn(doc, body) {
   }
 }
 
-test('the mouse is a spring-centred stick with a deadzone', () => {
+test('the mouse is a held rate, not a spring-centred stick', () => {
   // The whole model in one test. Under pointer lock there is no cursor
-  // position, so the stick is the *integral* of the movement - and it is a
-  // spring, not a ratchet: a push that stops ends.
-  const { win, doc, state } = capturedWindow();
+  // position, so mouse travel is accumulated - but into the *applied turn rate*
+  // rather than into a deflection that leaks away. Whatever the player dialled
+  // in stays until they dial something else.
+  const { win, state } = capturedWindow();
   assert.equal(state.pointerLocked, true, 'the pointer is not captured');
+  assert.equal(I.axes(state, 1 / 60).roll, 0, 'the ship turned before the mouse moved');
 
-  // A nudge well inside the deadzone: no turn at all. `MOUSE.deadzone` is a
-  // fraction of the stick, so the pixel threshold is deadzone / gain.
-  const insidePx = Math.floor(I.MOUSE.deadzone / I.MOUSE.gain * 0.5);
-  win.fire('mousemove', move(insidePx, 0));
-  assert.equal(I.axes(state, 1 / 60).roll, 0,
-    'a nudge of ' + insidePx + 'px steered the ship');
+  // A small nudge steers. This is the whole point of the change: under the old
+  // spring model a 9 px correction produced *exactly nothing*, because the
+  // spring cancelled everything below an equilibrium hand speed of 230 px/s.
+  win.fire('mousemove', move(9, 0));
+  const nudged = I.axes(state, 1 / 60).roll;
+  assert.ok(nudged > 0, 'a 9 px nudge steered nothing, got ' + nudged);
 
-  // A firm push to the right rolls right.
-  win.fire('mousemove', move(60, 0));
-  const pushed = I.axes(state, 1 / 60).roll;
-  assert.ok(pushed > 0, 'pushing the mouse right should roll right, got ' + pushed);
+  // And it holds. A second and a half of complete stillness must not touch the
+  // rate. The old model had the turn dead in 0.42 s, which is what made holding
+  // a course mean endlessly dragging the mouse.
+  for (let i = 0; i < 90; i += 1) I.axes(state, 1 / 60);
+  const held = I.axes(state, 1 / 60).roll;
+  assert.ok(Math.abs(held - nudged) < 1e-9,
+    'the rate decayed while the hand was still: ' + nudged + ' → ' + held);
 
-  // Let go and it springs back. At 60 fps and a decay of 2.2 units/s, half a
-  // second is more than enough to reach centre from any deflection.
-  withDocumentOn(doc, () => {
-    for (let i = 0; i < 40; i += 1) I.axes(state, 1 / 60);
-  });
-  assert.equal(I.axes(state, 1 / 60).roll, 0, 'the stick did not spring back to centre');
+  // And it is undoable by hand. There is no spring to return the ship to level,
+  // so the only way back is the player moving the mouse the other way - which
+  // has to work exactly, or "no spring" becomes "permanently stuck turning".
+  win.fire('mousemove', move(-9, 0));
+  assert.equal(I.axes(state, 1 / 60).roll, 0, 'the same nudge back did not cancel the turn');
 });
 
 test('a slower drag turns more gently than a fast one', () => {
@@ -367,31 +371,40 @@ test('a slower drag turns more gently than a fast one', () => {
     + small + ' vs ' + big);
 });
 
-test('the stick saturates at the end of its travel', () => {
-  // Past full deflection the ship must not turn harder, or a fast flick would
-  // out-turn a held key.
+test('the rate saturates at full deflection', () => {
+  // Past full rate the ship must not turn harder, or a fast flick would
+  // out-turn a held key. Saturation is also what gives the player a way back to
+  // centre: overshoot the axis, then come back.
   const { win, state } = capturedWindow();
   for (let i = 0; i < 40; i += 1) win.fire('mousemove', move(50, 0));
   const a = I.axes(state, 1 / 60);
-  assert.ok(a.roll <= 1, 'the stick exceeded full deflection: ' + a.roll);
-  assert.ok(a.roll > 0.8, 'a sustained drag did not reach the stop: ' + a.roll);
+  assert.ok(a.roll <= 1, 'the rate exceeded full deflection: ' + a.roll);
+  assert.equal(a.roll, 1, 'a sustained drag did not reach the stop: ' + a.roll);
 });
 
-test('the spring rate does not depend on the frame rate', () => {
-  // The same wall-clock push must give the same turn at 30 fps and at 144 fps,
-  // or two players on the same machine but different settings fly different
-  // ships. Measured as the deflection remaining after a fixed 0.25 s.
+test('the turn rate does not depend on the frame rate', () => {
+  // The same hand movement must give the same rate at 30 fps and at 144 fps, or
+  // two players on the same machine but different settings fly different ships.
+  //
+  // Deliberately measured at a travel that does *not* saturate: at full rate
+  // every frame rate reports 1.000 and the comparison proves nothing.
   const settled = (dt) => {
     const { win, state } = capturedWindow();
-    win.fire('mousemove', move(80, 0));
-    let frames = Math.round(0.25 / dt);
-    for (let i = 0; i < frames; i += 1) I.axes(state, dt);
-    return state.mouseTarget.x;
+    const frames = Math.round(1 / dt);
+    const perFramePx = 120 / frames;
+    for (let i = 0; i < frames; i += 1) {
+      win.fire('mousemove', move(perFramePx, 0));
+      I.axes(state, dt);
+    }
+    return state.mouse.x;
   };
   const t30 = settled(1 / 30);
+  const t60 = settled(1 / 60);
   const t144 = settled(1 / 144);
-  assert.ok(Math.abs(t30 - t144) < 0.06,
-    'the spring is frame-rate dependent: ' + t30.toFixed(3) + ' vs ' + t144.toFixed(3));
+  assert.ok(Math.abs(t30 - t60) < 1e-9 && Math.abs(t60 - t144) < 1e-9,
+    'the rate is frame-rate dependent: ' + t30 + ' / ' + t60 + ' / ' + t144);
+  // 120 px of travel at 0.0035 is 0.42 of full rate, unsaturated on purpose.
+  assert.ok(Math.abs(t30 - 0.42) < 1e-6, 'unexpected rate from 120 px: ' + t30);
 });
 
 test('the mouse cannot steer without pointer lock', () => {
@@ -412,17 +425,21 @@ test('keyboard and mouse combine without exceeding full deflection', () => {
   assert.ok(a.roll > 0.8, 'the keyboard and mouse together lost authority: ' + a.roll);
 });
 
-test('releasing the pointer centres the virtual stick', () => {
+test('releasing the pointer cancels the turn', () => {
   const { win, doc, state } = capturedWindow();
   for (let i = 0; i < 10; i += 1) win.fire('mousemove', move(40, 0));
-  assert.ok(Math.abs(I.axes(state, 1 / 60).roll) > 0, 'the stick never moved');
+  assert.ok(Math.abs(I.axes(state, 1 / 60).roll) > 0, 'the rate never moved');
 
   // Escape is the browser's own event, not the game's: it clears
   // `pointerLockElement` and fires the change. That is what the game has to
   // react to, because a player who presses Escape never tells the game.
+  //
+  // This is load-bearing under the held-rate model in a way it was not under
+  // the spring: the rate no longer decays on its own, so if the release did not
+  // zero it, the ship would keep turning forever with the cursor in the menu.
   withDocumentOn(doc, () => doc.exitPointerLock());
   assert.equal(state.pointerLocked, false, 'the release was not noticed');
-  assert.equal(state.mouseTarget.x, 0, 'the stick kept its deflection after the release');
+  assert.equal(state.mouse.x, 0, 'the rate survived the release');
   assert.equal(I.axes(state, 1 / 60).roll, 0, 'the ship kept turning after the pointer was let go');
 });
 

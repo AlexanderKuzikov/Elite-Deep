@@ -102,10 +102,16 @@ const MONO = '"SF Mono", "Cascadia Mono", "DejaVu Sans Mono", Consolas, monospac
 /**
  * Draw the whole HUD. `state` is everything it needs to know:
  *
- *   { width, height, scannerRange, speed, throttle, fuel, maxFuel, shields,
- *     maxShields, energy, maxEnergy, hull, maxHull, heat, maxHeat, missiles,
- *     laser, cooldown, cash, rank, cargoUsed, cargoMax, target, contacts,
- *     messages, alerts, attitude, radarMode }
+ *   { width, height, scannerRange, scannerAuto, speed, throttle, fuel, maxFuel,
+ *     shields, maxShields, energy, maxEnergy, hull, maxHull, heat, maxHeat,
+ *     missiles, laser, cooldown, cash, rank, cargoUsed, cargoMax, target,
+ *     contacts, messages, alerts, attitude, radarMode, nearestHostile }
+ *
+ * `scannerAuto` says whether `scannerRange` was chosen by the player or fitted
+ * to the traffic, which the range legend uses to print a `~`. Contacts beyond
+ * `scannerRange` are drawn pinned to the rim rather than dropped.
+ * `nearestHostile` is `{ distance, count, target }` for the closest hostile, or
+ * null; `count` is how many are inside the warning radius.
  */
 export function drawHud(ctx, state) {
   const w = state.width || 0;
@@ -288,17 +294,38 @@ function drawScanner(ctx, state) {
   ctx.stroke();
 
   // --- Contacts --------------------------------------------------------
+  //
+  // Contacts are plotted in polar form: `forward` and `right` are the two axes
+  // the scope can show, and the bearing is theirs. Everything outside the range
+  // circle is pinned to the rim and drawn as a chevron instead of being
+  // discarded.
+  //
+  // The discard was the defect. `prune` culls traffic at 2600 units while the
+  // scope is 2000, so there is a 600-unit band where a ship is real, closing,
+  // and completely invisible - and beyond it, everything else as well. Measured
+  // on a straight 20-second flight out of the station: 9 of 9 contacts drawn at
+  // undock, 7 at ten seconds, **2 at twenty** - seven ships hidden, at 2526 to
+  // 3946 units. A commander flying away from a fight could not see who was
+  // following, which is exactly when they need to.
   const range = state.scannerRange || 2000;
   const contacts = state.contacts || [];
   for (const c of contacts) {
-    // `forward` is the contact's distance along the ship's own nose; `right`
-    // and `up` are the lateral offsets. Passing them in pre-rotated keeps the
-    // scanner free of camera maths.
     const nx = c.right / range;
     const nz = c.forward / range;
-    if (nx * nx + nz * nz > 1) continue; // outside the scope
-    const px = cx + nx * r;
-    const py = cy - nz * r;
+    const offScale = nx * nx + nz * nz > 1;
+    let px;
+    let py;
+    if (offScale) {
+      // Pin to the rim along the contact's own bearing. The bearing is
+      // normalised so the marker sits exactly on the circle whatever the
+      // distance, which is what makes it read as "that way, further out".
+      const len = Math.hypot(nx, nz) || 1;
+      px = cx + (nx / len) * r;
+      py = cy - (nz / len) * r;
+    } else {
+      px = cx + nx * r;
+      py = cy - nz * r;
+    }
 
     const colour = c.station ? HUD_COLOURS.station
       : c.planet ? HUD_COLOURS.planet
@@ -307,15 +334,37 @@ function drawScanner(ctx, state) {
             : c.kind === 'capsule' ? HUD_COLOURS.friendly
               : HUD_COLOURS.neutral;
 
-    const size = c.station || c.planet ? 4.5 : c.target ? 3.6 : 2.6;
-    ctx.fillStyle = colour;
-    ctx.beginPath();
-    ctx.arc(px, py, size, 0, Math.PI * 2);
-    ctx.fill();
+    if (offScale) {
+      // A chevron pointing outward, from the centre of the scope through the
+      // marker. Shape rather than just a smaller dot: a dot on the rim is
+      // indistinguishable from a contact that happens to *be* at the rim.
+      const len = Math.hypot(nx, nz) || 1;
+      const dx = nx / len;
+      const dy = -nz / len;
+      const size = c.target ? 5.5 : 3.6;
+      ctx.fillStyle = colour;
+      ctx.beginPath();
+      ctx.moveTo(px + dx * size, py + dy * size);
+      ctx.lineTo(px - dy * size * 0.7 + dx * size * 0.2,
+        py + dx * size * 0.7 + dy * size * 0.2);
+      ctx.lineTo(px + dy * size * 0.7 + dx * size * 0.2,
+        py - dx * size * 0.7 + dy * size * 0.2);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      const size = c.station || c.planet ? 4.5 : c.target ? 3.6 : 2.6;
+      ctx.fillStyle = colour;
+      ctx.beginPath();
+      ctx.arc(px, py, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     // Elevation stub. Clamped to a readable range so a contact directly above
-    // does not draw a line off the top of the screen.
-    const lift = clamp(c.up / range * r, -r * 0.55, r * 0.55);
+    // does not draw a line off the top of the screen. Off-scale contacts get
+    // theirs shortened too, or the stub of a ship 4000 units away would run
+    // clear across the scope.
+    const lift = clamp(c.up / range * r, -r * 0.55, r * 0.55)
+      * (offScale ? 0.45 : 1);
     if (Math.abs(lift) > 1) {
       ctx.strokeStyle = colour;
       ctx.lineWidth = 1;
@@ -330,12 +379,13 @@ function drawScanner(ctx, state) {
       ctx.stroke();
     }
 
-    // Highlight the current target with a ring.
+    // Highlight the current target with a ring. Off-scale targets are already
+    // drawn larger, so only the ring is added here.
     if (c.target) {
       ctx.strokeStyle = HUD_COLOURS.target;
       ctx.lineWidth = 1.2;
       ctx.beginPath();
-      ctx.arc(px, py, size + 3, 0, Math.PI * 2);
+      ctx.arc(px, py, (offScale ? 5.5 : 3.6) + 3, 0, Math.PI * 2);
       ctx.stroke();
     }
   }
@@ -351,11 +401,52 @@ function drawScanner(ctx, state) {
   ctx.fill();
 
   // --- Range legend -----------------------------------------------------
+  //
+  // Auto-fit changes the scale without the player asking, so the legend has to
+  // say so or the numbers move under their feet for no visible reason. `~`
+  // marks a fitted range, the plain number a range the player chose.
   ctx.fillStyle = HUD_COLOURS.inkDim;
   ctx.font = (HUD_LAYOUT.smallFont * (state.scale || 1)) + 'px ' + MONO;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText(formatDistance(range), cx, cy + r + 5);
+  ctx.fillText(
+    (state.scannerAuto ? '~' : '') + formatDistance(range),
+    cx, cy + r + 5,
+  );
+
+  // --- Legend -----------------------------------------------------------
+  //
+  // The marks were colour-coded from the start and nothing ever said what the
+  // colours meant, so a red mark and a white one were the same information to
+  // any player who had not read the source. Only shown while there is
+  // *something* to explain: three swatches over an empty system is clutter,
+  // and the point of the line is that it appears when it matters.
+  const hasHostile = contacts.some((c) => c.hostile);
+  if (hasHostile) {
+    const ly = cy + r + 5 + HUD_LAYOUT.smallFont * (state.scale || 1) + 4;
+    const items = [
+      { colour: HUD_COLOURS.hostile, label: 'hostile' },
+      { colour: HUD_COLOURS.neutral, label: 'trader' },
+      { colour: HUD_COLOURS.station, label: 'station' },
+    ];
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    // Measure once so the swatches can be centred as a group rather than hand-
+    // placed, which is what makes it survive a different label.
+    let total = 0;
+    for (const it of items) total += 9 + ctx.measureText(it.label).width + 7;
+    let lx = cx - total / 2;
+    for (const it of items) {
+      ctx.fillStyle = it.colour;
+      ctx.beginPath();
+      ctx.arc(lx + 3, ly, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = HUD_COLOURS.inkDim;
+      ctx.fillText(it.label, lx + 9, ly);
+      lx += 9 + ctx.measureText(it.label).width + 7;
+    }
+    ctx.textAlign = 'center';
+  }
 }
 
 /** The left column: shields, fuel, energy, heat, hull. */
