@@ -890,6 +890,87 @@ try {
   check('the ship has combat resources', resources.energy > 0 && resources.shields > 0 && resources.hull > 0,
     `hull ${resources.hull} shields ${resources.shields} energy ${resources.energy} missiles ${resources.missiles}`);
 
+  // --- Spatial audio ------------------------------------------------------
+  //
+  // The pan and the brightness end up in an AudioContext, and a headless run
+  // cannot listen. What *can* be checked is the measurement that feeds them:
+  // `spaceOf` is the one place the ship's frame becomes a sound position, so
+  // if its numbers are right the sound is right, and if they are wrong the
+  // sound is wrong in a way no unit test could catch - the unit tests feed
+  // `spaceOf`'s *output*, not the live ship it reads.
+  //
+  // Bearing is checked against a bearing computed here from the ship's own
+  // axes, deliberately by a different route (a rotated basis vector, not two
+  // dot products), because a check that recomputes the implementation's own
+  // arithmetic agrees with it even when both are wrong.
+  const space = await page.evaluate(() => {
+    const g = window.__ELITE_GAME__;
+    g.setMode('flight');
+    g.step(1 / 60, 300, { render: false });
+    const f = g.session.flight;
+
+    // The ship's basis, rebuilt independently of the game's own helpers: a
+    // quaternion applied by hand to the three unit vectors. Using the ship's
+    // basis rather than world axes means the expected pan is known without the
+    // check needing to know which way the ship happens to face.
+    const q = f.quat;
+    const rot = (x, y, z) => ({
+      x: x * (1 - 2 * (q.y * q.y + q.z * q.z)) + y * 2 * (q.x * q.y - q.w * q.z) + z * 2 * (q.x * q.z + q.w * q.y),
+      y: x * 2 * (q.x * q.y + q.w * q.z) + y * (1 - 2 * (q.x * q.x + q.z * q.z)) + z * 2 * (q.y * q.z - q.w * q.x),
+      z: x * 2 * (q.x * q.z - q.w * q.y) + y * 2 * (q.y * q.z + q.w * q.x) + z * (1 - 2 * (q.x * q.x + q.y * q.y)),
+    });
+    const basis = { fwd: rot(0, 0, 1), right: rot(1, 0, 0), up: rot(0, 1, 0) };
+    const place = (v, scale) => ({
+      x: f.pos.x + v.x * scale, y: f.pos.y + v.y * scale, z: f.pos.z + v.z * scale,
+    });
+
+    return {
+      front: g.spaceOf(place(basis.fwd, 500)),
+      starboard: g.spaceOf(place(basis.right, 500)),
+      above: g.spaceOf(place(basis.up, 500)),
+      // Behind *and* to the right. Dead astern is pan 0 by design, so this is
+      // the case that proves the side survives the "behind" part.
+      behindRight: g.spaceOf(place({
+        x: -basis.fwd.x + basis.right.x,
+        y: -basis.fwd.y + basis.right.y,
+        z: -basis.fwd.z + basis.right.z,
+      }, 500)),
+      nullPos: g.spaceOf(null),
+    };
+  });
+
+  // Dead ahead and dead astern both pan to the centre - that is the whole
+  // reason elevation is carried separately, so it is pinned rather than
+  // treated as a rounding artefact.
+  check('a sound dead ahead sits centred between the ears',
+    !space.front || Math.abs(space.front.pan) < 0.01,
+    space.front ? 'pan ' + space.front.pan.toFixed(6) : 'no position');
+
+  check('a sound off the starboard bow pans right',
+    space.starboard && space.starboard.pan > 0.9,
+    space.starboard ? 'pan ' + space.starboard.pan.toFixed(4) : 'no position');
+
+  check('a sound overhead is placed high rather than level',
+    space.above && space.above.height > 0.9,
+    space.above ? 'height ' + space.above.height.toFixed(4) : 'no position');
+
+  check('a sound behind and to the right pans right, so the side survives',
+    space.behindRight && space.behindRight.pan > 0.5 && space.behindRight.forward < 0,
+    space.behindRight
+      ? 'pan ' + space.behindRight.pan.toFixed(4) + ' forward ' + space.behindRight.forward.toFixed(4)
+      : 'no position');
+
+  check('a sound at a known range reports that range',
+    space.starboard && Math.abs(space.starboard.distance - 500) < 1,
+    space.starboard ? 'distance ' + space.starboard.distance.toFixed(2) : 'no position');
+
+  check('a distant sound is quieter than a near one',
+    space.starboard && space.starboard.volume < 1 && space.starboard.volume > 0,
+    space.starboard ? 'volume ' + space.starboard.volume.toFixed(4) : 'no position');
+
+  check('a missing source position is refused rather than placed at the origin',
+    space.nullPos === null, String(space.nullPos));
+
   // --- The chart ----------------------------------------------------------
   const chart = await page.evaluate(() => {
     const g = window.__ELITE_GAME__;

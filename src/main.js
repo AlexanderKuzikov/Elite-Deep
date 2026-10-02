@@ -1439,7 +1439,7 @@ export function boot(host, options) {
       if (session.incoming.indexOf(hit.target) >= 0) {
         // Shot down. Worth a distinct cue: this is the one shot in the game
         // that saves the ship rather than destroying something.
-        play('explode');
+        play('explode', undefined, undefined, spaceOf(hit.target.mesh.position));
         spawnImpact(hit.point, 0xff7a4d);
         spawnExplosion(hit.target.mesh.position);
         say('Missile destroyed', HUD.HUD_COLOURS.ok);
@@ -1619,7 +1619,10 @@ export function boot(host, options) {
 
     const pos = entity.mesh.position;
     spawnExplosion(pos);
-    play('explode');
+    // Placed in the world it happened in. A kill behind you is quieter and to
+    // one side, which is the difference between "I am shooting" and "something
+    // I cannot see just died" - the same distinction the enemy's own gun needed.
+    play('explode', undefined, undefined, spaceOf(pos));
 
     // Remove it now rather than waiting for the prune pass, so the wreck does
     // not absorb the next shot.
@@ -1637,7 +1640,10 @@ export function boot(host, options) {
     const target = session.target;
     if (!target || target.dead) { play('deny'); return say('No target locked'); }
     player.missiles -= 1;
-    play('missile');
+    // `self: true` so the cue stays centred: this one leaves your own rails.
+    // The *inbound* missile warning reuses the same cue and passes a real
+    // space, which is the whole reason the two need telling apart.
+    play('missile', 1, undefined, { self: true });
     const mesh = new THREE.Mesh(
       new THREE.ConeGeometry(0.35, 2.2, 6),
       new THREE.MeshBasicMaterial({ color: 0xffd27a }),
@@ -1692,13 +1698,19 @@ export function boot(host, options) {
   function hurtPlayer(amount, opts) {
     if (session.grace > 0 && !(opts && opts.ignoreGrace)) return null;
     const result = COMBAT.damagePlayer(player, amount, opts);
+    // Where the impact came from, when the caller knows. A missile hitting the
+    // hull from astern and a rock you flew into should not sound identical:
+    // one tells you to break, the other tells you that you were careless. The
+    // caller passes a world position - never the ship's own, which would pan
+    // a hull breach to whichever side happened to be "right" that frame.
+    const space = opts && opts.source ? spaceOf(opts.source) : null;
     if (result.hullLost > 0) {
-      play('hitHull');
+      play('hitHull', space ? space.volume : 1, undefined, space);
       renderer.flash(Math.min(0.9, result.hullLost / 25));
       renderer.addShake(Math.min(1.2, result.hullLost / 30));
       FLIGHT.addShake(session.flight, Math.min(1.2, result.hullLost / 30));
     } else if (result.shieldsLost > 0) {
-      play('hitShield');
+      play('hitShield', space ? space.volume : 1, undefined, space);
       renderer.addShake(0.25);
     }
     session.sinceDamage = 0;
@@ -1994,7 +2006,13 @@ export function boot(host, options) {
    * delay and the HUD warns, which is both cheaper and fairer.
    */
   function onEnemyShot(entity, shot) {
-    play('enemyShot');
+    // The shot is placed where the *shooter* is, and this is the single most
+    // important sound in the game: a commander who cannot see behind them has
+    // only this to tell them which way to break. The bearing used to be spent
+    // on a message ("Under fire from behind") and nothing else, so the one
+    // fact worth hearing was the one fact the mix did not carry.
+    const space = spaceOf(entity.mesh.position);
+    play('enemyShot', space ? space.volume : 1, undefined, space);
     // The shot lands almost immediately; the delay is only enough that the
     // sound and the flash do not coincide exactly, which reads as broken.
     session.shots.push({
@@ -2041,6 +2059,47 @@ export function boot(host, options) {
   }
 
   /**
+   * Where a world position sits relative to the pilot's ears.
+   *
+   * Returns `{ pan, height, volume }`, all -1..1 except `volume`, which is
+   * 0..1 and already includes distance falloff. This is the one place the
+   * ship's own frame is turned into something the audio module can use, so
+   * the HUD's damage arcs and the sound are two readings of one measurement
+   * rather than two measurements that drift apart.
+   *
+   * `pan` is the sine of the bearing: negative to port, positive to starboard.
+   * Deliberately a sine and not the bearing angle - a source dead astern and
+   * one dead ahead both have a sine of zero, which is correct: both are
+   * centred between the ears. Where they differ is `height`, and that is why
+   * elevation is carried separately rather than folded into the pan.
+   */
+  function spaceOf(sourcePos) {
+    const f = session.flight;
+    if (!f || !sourcePos) return null;
+    const fwd = FLIGHT.forwardOf(f);
+    const right = FLIGHT.rightOf(f);
+    const up = FLIGHT.upOf(f);
+    const dx = sourcePos.x - f.pos.x;
+    const dy = sourcePos.y - f.pos.y;
+    const dz = sourcePos.z - f.pos.z;
+    const distance = Math.hypot(dx, dy, dz) || 1;
+    return {
+      pan: (dx * right.x + dy * right.y + dz * right.z) / distance,
+      height: (dx * up.x + dy * up.y + dz * up.z) / distance,
+      distance: distance,
+      // Through the *instance*, not the module: `volumeAt` is a method on what
+      // `createAudio` returns, not a namespace export. Addressing it as
+      // `AUDIO.volumeAt` reads as though it were, resolves to `undefined`, and
+      // silently returns `undefined` here - so every spatialised cue would play
+      // at full volume with no distance falloff at all.
+      volume: audio.volumeAt(distance, 120, 1600),
+      // Forward-ness, so a caller can tell "behind" from "ahead" - both pan
+      // to the centre. Not used for panning; used for messages.
+      forward: (dx * fwd.x + dy * fwd.y + dz * fwd.z) / distance,
+    };
+  }
+
+  /**
    * A missile has been launched at the player.
    *
    * Deliberately its own list rather than a flag on `session.missiles`: the
@@ -2048,7 +2107,13 @@ export function boot(host, options) {
    * would mean every step of the loop asking which kind it was holding.
    */
   function onEnemyMissile(entity, spec) {
-    play('missile');
+    const space = spaceOf(entity.mesh.position);
+    // `self: false` because the same cue is also the player's own launch, which
+    // must stay centred. This is the one place the two are told apart.
+    // `spaceOf` returns a fresh object per call, so tagging it here cannot
+    // leak into another caller's reading.
+    if (space) space.self = false;
+    play('missile', space ? space.volume : 1, undefined, space);
     const mesh = new THREE.Mesh(
       new THREE.ConeGeometry(0.3, 1.8, 6),
       new THREE.MeshBasicMaterial({
@@ -2107,7 +2172,7 @@ export function boot(host, options) {
 
       if (d < PLAYER_HIT_RADIUS) {
         spawnExplosion(m.mesh.position);
-        hurtPlayer(m.damage, {});
+        hurtPlayer(m.damage, { source: m.mesh.position });
         noteHit(m.mesh.position);
         dropIncoming(i);
       }
@@ -2154,7 +2219,9 @@ export function boot(host, options) {
     for (let i = session.shots.length - 1; i >= 0; i -= 1) {
       const s = session.shots[i];
       if (s.life > 0) continue;
-      hurtPlayer(s.damage, {});
+      // `from` is where the shooter was, which is what the ear needs - not the
+      // impact point, which is always the ship itself and would pan to nothing.
+      hurtPlayer(s.damage, { source: s.from });
       session.shots.splice(i, 1);
     }
   }
@@ -2932,7 +2999,7 @@ export function boot(host, options) {
       // crawl is a scrape, not a breach.
       const speed = FLIGHT.speedOf(f);
       const damage = Math.min(30, 6 + speed * 0.11);
-      hurtPlayer(damage, { pierce: true });
+      hurtPlayer(damage, { pierce: true, source: st.position });
       noteHit(st.position);
       // Push out along the surface normal so we do not stick inside.
       const n = {
@@ -2989,7 +3056,7 @@ export function boot(host, options) {
     const speed = FLIGHT.speedOf(f);
     const damage = Math.min(34, speed * 0.13);
     if (damage < 2) return false;      // resting against a rock is not an event
-    hurtPlayer(damage, { pierce: true });
+    hurtPlayer(damage, { pierce: true, source: rockPos });
     noteHit(rockPos);
     // Push out so the rock does not grind the hull away over the next
     // hundred frames.
@@ -3553,6 +3620,18 @@ export function boot(host, options) {
       INPUT.releaseMouse(input);
       return this.debugPointer();
     },
+
+    /**
+     * Where a world position sits relative to the pilot's ears.
+     *
+     * Exposed because the spatial audio is the one feature whose *input* has
+     * no screen representation to check: the pan and the brightness go into an
+     * AudioContext, and a headless browser cannot listen. Asserting on the
+     * numbers that feed it is the only way to prove the wiring is live, and
+     * asserting at all requires reaching the function the game itself calls -
+     * a reimplementation in the driver would test the driver.
+     */
+    spaceOf(sourcePos) { return spaceOf(sourcePos); },
   };
 }
 

@@ -327,6 +327,174 @@ test('stopAll silences the engine without throwing', () => {
   assert.equal(engineGain.gain.lastTarget, 0, 'stopAll left the engine running');
 });
 
+// ---------------------------------------------------------------------------
+// Spatial placement.
+//
+// The bug this whole section guards against is the one that made the dogfight
+// unreadable: "someone is shooting at me" and "I am shooting" were the same
+// sound in the same place. A test that only asserts "the cue played" would pass
+// with the spatial stage deleted, so every test here asserts on the *pan* or
+// the *brightness*, which is the information the player actually receives.
+// ---------------------------------------------------------------------------
+
+test('a sound to starboard pans right and one to port pans left', () => {
+  const ctx = makeFakeContext();
+  const audio = A.createAudio({ audioContext: () => ctx });
+  audio.resume();
+
+  audio.play('enemyShot', 1, undefined, { pan: 1, height: 0 });
+  const right = ctx.nodes.panner[ctx.nodes.panner.length - 1].pan.value;
+
+  ctx.advance(0.2);
+  audio.play('enemyShot', 1, undefined, { pan: -1, height: 0 });
+  const left = ctx.nodes.panner[ctx.nodes.panner.length - 1].pan.value;
+
+  assert.ok(right > 0, 'a source to starboard did not pan right: ' + right);
+  assert.ok(left < 0, 'a source to port did not pan left: ' + left);
+});
+
+test('pan is clamped to the stereo field', () => {
+  // `spaceOf` divides by a guarded distance, so a caller passing a raw
+  // unnormalised vector must not be able to push the panner out of range - an
+  // out-of-range pan silently clamps in some browsers and throws in others.
+  const ctx = makeFakeContext();
+  const audio = A.createAudio({ audioContext: () => ctx });
+  audio.resume();
+  audio.play('enemyShot', 1, undefined, { pan: 40, height: 0 });
+  const pan = ctx.nodes.panner[ctx.nodes.panner.length - 1].pan.value;
+  assert.ok(pan <= 1 && pan >= -1, 'pan escaped the stereo field: ' + pan);
+});
+
+test("the player's own cues are never panned", () => {
+  // A laser leaving *your* nose and a missile leaving *your* rails have no
+  // bearing - they happen at the ear. Panning them would be a lie, and the
+  // tests below would pass even if the distinction were lost.
+  const ctx = makeFakeContext();
+  const audio = A.createAudio({ audioContext: () => ctx });
+  audio.resume();
+  const before = ctx.created.panner;
+  audio.play('laser', 1, undefined, { pan: 0.9, height: 0.2 });
+  audio.play('missile', 1, undefined, { pan: 0.9, height: 0.2 });
+  assert.equal(ctx.created.panner, before, 'a self-cue was given a bearing it does not have');
+});
+
+test('the self-cue list and the panning code agree', () => {
+  // `SELF_CUES` is the one place that decides by default, so it must not
+  // silently lose an entry: a cue that is neither a self-cue nor positional
+  // would play centred forever with nothing failing.
+  assert.ok(A.SELF_CUES.laser, "the player's own laser should be a self-cue");
+  assert.ok(A.SELF_CUES.hyper, "the jump is the ship's own sound");
+  assert.ok(!A.SELF_CUES.enemyShot, "the enemy's gun must be positional or it cannot warn");
+  assert.ok(!A.SELF_CUES.explode, 'an explosion has a place in the world');
+  assert.ok(!A.SELF_CUES.hitHull, 'an impact has a place in the world once the caller knows it');
+});
+
+test("the missile cue is both the player's launch and an inbound threat", () => {
+  // The one cue that cannot be classified by name alone, and the reason the
+  // override exists. Both halves are asserted, because either one alone would
+  // pass with the mechanism broken: if `self` were ignored the player's own
+  // launch would pan; if the list were ignored the inbound warning would be
+  // silent about direction, which is exactly the defect this feature fixes.
+  const ctx = makeFakeContext();
+  const audio = A.createAudio({ audioContext: () => ctx });
+  audio.resume();
+
+  const before = ctx.created.panner;
+  assert.equal(audio.play('missile', 1, undefined, { self: true }), true);
+  assert.equal(ctx.created.panner, before, "the player's own launch was given a bearing");
+
+  ctx.advance(0.2);
+  assert.equal(audio.play('missile', 1, undefined, { pan: 0.8, height: 0, self: false }), true);
+  assert.equal(ctx.created.panner, before + 1, 'the inbound warning was not placed');
+  assert.ok(ctx.nodes.panner[ctx.nodes.panner.length - 1].pan.value > 0.5,
+    'the inbound missile did not pan to the side it came from');
+});
+
+test('a source dead level and dead astern spends no nodes', () => {
+  // Dead astern and dead ahead are both pan 0. Rather than build a stage that
+  // does nothing, the code returns null - which is also what keeps a
+  // hundred-shot frame cheap.
+  const ctx = makeFakeContext();
+  const audio = A.createAudio({ audioContext: () => ctx });
+  audio.resume();
+  const before = ctx.created.panner;
+  audio.play('enemyShot', 1, undefined, { pan: 0, height: 0 });
+  assert.equal(ctx.created.panner, before, 'a centred source built a panner');
+});
+
+test('height is carried by brightness, not by pan', () => {
+  // This is the whole reason the design uses a filter. StereoPannerNode has no
+  // concept of elevation: a source directly above and one directly below pan
+  // identically. If brightness were dropped the vertical axis would be silent.
+  const ctx = makeFakeContext();
+  const audio = A.createAudio({ audioContext: () => ctx });
+  audio.resume();
+
+  audio.play('enemyShot', 1, undefined, { pan: 0.4, height: 1 });
+  const above = ctx.nodes.filter[ctx.nodes.filter.length - 1].frequency.value;
+  const abovePan = ctx.nodes.panner[ctx.nodes.panner.length - 1].pan.value;
+
+  ctx.advance(0.2);
+  audio.play('enemyShot', 1, undefined, { pan: 0.4, height: -1 });
+  const below = ctx.nodes.filter[ctx.nodes.filter.length - 1].frequency.value;
+  const belowPan = ctx.nodes.panner[ctx.nodes.panner.length - 1].pan.value;
+
+  assert.ok(above > below, 'a source above is not brighter than one below: ' + above + ' vs ' + below);
+  assert.ok(above / below > 4, 'the brightness difference is too small to hear: ' + above + ' vs ' + below);
+  assert.equal(abovePan, belowPan, 'height leaked into pan, which cannot carry it');
+});
+
+test('a below-deck explosion is duller than one overhead, across the range', () => {
+  const ctx = makeFakeContext();
+  const audio = A.createAudio({ audioContext: () => ctx });
+  audio.resume();
+  const cut = (h) => {
+    ctx.advance(0.2);
+    audio.play('enemyShot', 1, undefined, { pan: 0.5, height: h });
+    return ctx.nodes.filter[ctx.nodes.filter.length - 1].frequency.value;
+  };
+  const levels = [-1, -0.5, 0, 0.5, 1].map(cut);
+  for (let i = 1; i < levels.length; i += 1) {
+    assert.ok(levels[i] >= levels[i - 1],
+      'brightness is not monotonic in height: ' + levels.join(', '));
+  }
+});
+
+test('a positional cue still respects the rate limiter and the mute switch', () => {
+  // The spatial stage sits *after* both, so adding it must not create a way
+  // around them.
+  const ctx = makeFakeContext();
+  const audio = A.createAudio({ audioContext: () => ctx });
+  audio.resume();
+  let played = 0;
+  for (let i = 0; i < 20; i += 1) {
+    if (audio.play('enemyShot', 1, undefined, { pan: 0.7, height: 0 })) played += 1;
+  }
+  assert.equal(played, 1, 'the spatial stage bypassed the rate limiter');
+  audio.setMuted(true);
+  ctx.advance(0.5);
+  assert.equal(audio.play('enemyShot', 1, undefined, { pan: 0.7, height: 0 }), false);
+});
+
+test('a zero space plays the cue unpanned rather than dropping it', () => {
+  // `spaceOf` returns null when the ship has no pose yet - at boot, or in the
+  // menus. A cue that arrives then is a real event and must still be heard.
+  const ctx = makeFakeContext();
+  const audio = A.createAudio({ audioContext: () => ctx });
+  audio.resume();
+  assert.equal(audio.play('enemyShot', 1, undefined, null), true, 'a null space dropped the cue');
+  assert.equal(audio.play('enemyShot', 1, undefined, undefined), false,
+    'the second call should be rate-limited, proving the first really played');
+});
+
+test('the spatial constants describe a field that can be heard', () => {
+  assert.ok(A.SPATIAL.fullPan > 0 && A.SPATIAL.fullPan <= 1);
+  assert.ok(A.SPATIAL.aboveCutoff <= 20000, 'the bright end is above hearing');
+  assert.ok(A.SPATIAL.belowCutoff > 100, 'the dull end would swallow the cue entirely');
+  assert.ok(A.SPATIAL.aboveCutoff / A.SPATIAL.belowCutoff > 8,
+    'the height sweep is too narrow to distinguish above from below');
+});
+
 /**
  * A WebAudio stand-in. Only the surface audio.js touches, but complete enough
  * that the real code path runs: every node type it creates, plus AudioParam
@@ -374,8 +542,8 @@ function makeFakeContext() {
     sampleRate: 44100,
     state: 'running',
     get currentTime() { return now; },
-    created: { oscillator: 0, gain: 0, filter: 0, compressor: 0, buffer: 0, bufferSource: 0 },
-    nodes: { oscillator: [], gain: [], filter: [], compressor: [], bufferSource: [] },
+    created: { oscillator: 0, gain: 0, filter: 0, compressor: 0, buffer: 0, bufferSource: 0, panner: 0 },
+    nodes: { oscillator: [], gain: [], filter: [], compressor: [], bufferSource: [], panner: [] },
     destination: node('destination'),
     resume() { this.state = 'running'; },
     createOscillator() {
@@ -383,6 +551,12 @@ function makeFakeContext() {
       const o = node('oscillator', { type: 'sine', frequency: param(440) });
       this.nodes.oscillator.push(o);
       return o;
+    },
+    createStereoPanner() {
+      this.created.panner += 1;
+      const p = node('panner', { pan: param(0) });
+      this.nodes.panner.push(p);
+      return p;
     },
     createGain() {
       this.created.gain += 1;

@@ -21,6 +21,53 @@ export const LEVELS = {
   music: 0.30,
 };
 
+/**
+ * How the spatial stage maps a source position to the stereo field.
+ *
+ * The game has no listener object and no head-related transfer function: the
+ * player's own ship *is* the origin, and their nose is "forward". That is
+ * enough to place a sound in the horizontal plane, which is the plane the
+ * player actually steers in.
+ */
+export const SPATIAL = {
+  /**
+   * Full pan at this much lateral separation.
+   *
+   * Pan is `lateral / distance`, which is the sine of the bearing. At 90
+   * degrees off the nose that is 1, so this is the natural saturation point
+   * and needs no constant of its own - kept named so the intent is readable
+   * and so a narrower field can be dialled in without hunting the formula.
+   */
+  fullPan: 1,
+  /**
+   * How much the vertical axis costs in brightness, as a filter sweep.
+   *
+   * This is the whole reason a vertical offset is audible at all. Stereo
+   * panning carries no information about height - a sound directly above and
+   * one directly below pan identically - so height has to be encoded in
+   * timbre instead. The convention chosen here is the one ears already use:
+   * a source above you is brighter (direct sound, less obstruction from the
+   * hull), a source below is duller (heard through the deck). The cutoff
+   * swings between these two, linearly in the sine of the elevation.
+   */
+  aboveCutoff: 16000,
+  belowCutoff: 700,
+};
+
+/** Cues played at the listener's own position, so they are never panned. */
+export const SELF_CUES = {
+  laser: true, lock: true, beep: true, confirm: true, deny: true,
+  dock: true, undock: true, hyper: true, rank: true, scoop: true,
+  lowFuel: true, death: true, warn: true,
+  // Listed so the list is *true*, but note that it is only half the story:
+  // `missile` is a self-cue when the player launches one and a positional cue
+  // when a pirate does. The same name covers both, so the caller decides - the
+  // launch passes `{ self: true }`, the inbound warning passes a real space and
+  // `self: false`. Neither half is redundant: this entry covers the launch, and
+  // the override is what lets the warning through.
+  missile: true,
+};
+
 /** Base frequencies and durations per cue. */
 export const CUES = {
   laser:      { freq: 1450, end: 380,  dur: 0.11, type: 'square',   gain: 0.24, sweep: 'down' },
@@ -235,10 +282,93 @@ export function createAudio(options) {
   }
 
   /**
+   * Build the pan and timbre nodes for one sound, or null to play it centred.
+   *
+   * Null is returned for a self-cue, for a source with nothing to say (dead
+   * astern and dead level), and for a host with no panner. All three mean the
+   * same thing downstream: connect straight to the bus.
+   *
+   * Pan uses `StereoPannerNode`, which is equal-power and therefore does not
+   * dip in the middle of the sweep - a linear pan makes a sound crossing the
+   * nose go quiet, which reads as it moving away.
+   *
+   * Height is *not* available to a panner. Two sources at the same bearing,
+   * one above and one below, pan identically, so height is encoded as
+   * brightness instead: the same trick the ear uses, and the reason a sound
+   * heard through a floor is duller than one heard directly. Without this the
+   * vertical axis would be silent, and a dogfight's most useful fact - is he
+   * above me or below me - would stay invisible *and* inaudible.
+   */
+  function spatialStage(ctx, name, space) {
+    if (!space) return null;
+    // `space.self` is the caller overriding the name's default: `missile` is the
+    // one cue that is both the player's own launch and an inbound threat, and
+    // no static list can tell the two apart. An explicit `self: true` also
+    // lets a future self-cue be panned deliberately without editing the list.
+    if (space.self) return null;
+    if (SELF_CUES[name] && space.self !== false) return null;
+    const pan = typeof space.pan === 'number' ? Math.max(-1, Math.min(1, space.pan)) : 0;
+    const height = typeof space.height === 'number'
+      ? Math.max(-1, Math.min(1, space.height)) : 0;
+
+    // Nothing to say - dead astern, dead level - so do not spend two nodes.
+    if (Math.abs(pan) < 0.02 && Math.abs(height) < 0.02) return null;
+
+    const input = ctx.createGain();
+    const output = ctx.createGain();
+    let tail = input;
+
+    if (typeof ctx.createStereoPanner === 'function') {
+      const panner = ctx.createStereoPanner();
+      panner.pan.value = pan * SPATIAL.fullPan;
+      tail.connect(panner);
+      tail = panner;
+    } else if (typeof ctx.createPanner === 'function') {
+      // Fallback for hosts without the panner: an equal-power PannerNode is
+      // more than this needs, but it is present everywhere.
+      const panner = ctx.createPanner();
+      panner.panningModel = 'equalpower';
+      panner.setPosition(pan, 0, Math.sqrt(Math.max(0, 1 - pan * pan)));
+      tail.connect(panner);
+      tail = panner;
+    }
+
+    if (Math.abs(height) > 0.02) {
+      const tone = ctx.createBiquadFilter();
+      tone.type = 'lowpass';
+      // Above is bright, below is dull, linearly in the sine of elevation.
+      const t = (height + 1) / 2;
+      tone.frequency.value = SPATIAL.belowCutoff
+        + (SPATIAL.aboveCutoff - SPATIAL.belowCutoff) * t;
+      tail.connect(tone);
+      tail = tone;
+    }
+
+    tail.connect(output);
+    // Tagged so tests can find the stage without guessing at node identity,
+    // the same way the engine gain is tagged.
+    input._isSpatial = true;
+    input._pan = pan;
+    input._height = height;
+    return { input, output };
+  }
+
+  /**
    * Play a cue. `volume` scales the cue's own gain (used for distance falloff),
    * and `rate` detunes it (used so repeated shots do not sound identical).
+   *
+   * `space` places the sound relative to the listener: `{ pan, height }`, both
+   * -1..1. `pan` is the sine of the bearing (negative to port, positive to
+   * starboard) and `height` is the sine of the elevation (negative below,
+   * positive above). Omit it for anything that happens *at* the ship.
+   *
+   * The distinction matters and is the point of the whole feature. Before
+   * this, "a laser is being fired at you" and "your own laser fired" were the
+   * same sound in the same place - so the one thing a dogfight needs, which
+   * is knowing *where* the threat is, was the one thing the audio did not
+   * carry. A commander had to look away from the target to find out.
    */
-  function play(name, volume, rate) {
+  function play(name, volume, rate, space) {
     if (state.muted || !state.ready) return false;
     const spec = CUES[name];
     const ctx = ctxRef.ctx;
@@ -259,10 +389,21 @@ export function createAudio(options) {
     if (vol <= 0.001) return false;
     const pitch = rate || 1;
 
-    const g = ctx.createGain();
-    g.connect(ctxRef.sfx);
     const t0 = now;
     const dur = spec.dur / Math.max(0.5, pitch);
+
+    // --- Spatial stage ---------------------------------------------------
+    // Built between the cue's own gain and the sfx bus, so nothing below has
+    // to know about it. For a cue that belongs to the ship itself the stage
+    // is null and the cue connects straight to the bus, as before.
+    const stage = spatialStage(ctx, name, space);
+    const g = ctx.createGain();
+    if (stage) {
+      g.connect(stage.input);
+      stage.output.connect(ctxRef.sfx);
+    } else {
+      g.connect(ctxRef.sfx);
+    }
 
     if (spec.noise) {
       const src = ctx.createBufferSource();
@@ -352,4 +493,4 @@ export function createAudio(options) {
   };
 }
 
-export default { LEVELS, CUES, createAudio };
+export default { LEVELS, CUES, SPATIAL, SELF_CUES, createAudio };
