@@ -284,25 +284,29 @@ try {
   // return early then - a game that asked for a lock it already had would be
   // the bug. So the pointer is given back first, exactly as Escape does, and
   // its cooldown is waited out on the live clock.
+  //
+  // The stub below counts the ask and does nothing else. It must not call the
+  // real method: a granted lock would clip the cursor at OS level, outside the
+  // headless window, and confine the physical mouse on the machine running the
+  // suite. See the note inside.
   await page.evaluate(() => {
     const g = window.__ELITE_GAME__;
     const canvas = document.getElementById('elite-world');
     const w = window;
     w.__mouseProbe = { asked: 0, wrongElement: false, canvasId: canvas.id };
-    const realRequest = canvas.requestPointerLock;
+    // The stub records the ask and stops there. The real `requestPointerLock`
+    // is deliberately *not* called: on a desktop Chrome it can grant a genuine
+    // OS-level pointer lock, and the lock's cursor clip is global - it would
+    // escape the headless window and confine the physical mouse on the host
+    // machine. The lock itself is not what this check covers; it cannot be,
+    // because headless Chrome refuses the gesture anyway. What is covered is
+    // that the game *asks*, on an element that can hold the lock. That is the
+    // whole contract, and it survives the stub untouched.
     canvas.requestPointerLock = function () {
       w.__mouseProbe.asked += 1;
       // The element the request is made on. The defect guarded against is a
       // request that goes to the window, which cannot hold a lock at all.
       if (this !== canvas) w.__mouseProbe.wrongElement = true;
-      // The real call is made, but the refusal is swallowed: headless Chrome
-      // grants no gesture to a synthetic keypress, so the promise would reject
-      // and take the page with it. The refusal is still *counted* by the game,
-      // which is fine - the check is that the ask happened.
-      try {
-        const p = realRequest.apply(this, arguments);
-        if (p && typeof p.catch === 'function') p.catch(() => {});
-      } catch (err) { /* no gesture: expected in a headless run */ }
       return undefined;
     };
   });
